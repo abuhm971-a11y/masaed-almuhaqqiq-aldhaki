@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
+import { transcribeImage } from "./lib/supabaseClient";
 
 type SyncMode = "independent" | "manuscript" | "printed";
 type PanelSide = "right" | "left";
@@ -9,9 +10,6 @@ const DEFAULT_SIDE_WIDTH = 340;
 const MIN_SIDE_WIDTH = 220;
 const MAX_SIDE_WIDTH = 640;
 
-/** A side panel (manuscript image or printed image). Collapses to a closed
- * vertical strip and can be hidden entirely. Never affects the center panel's
- * guaranteed minimum width. */
 function SidePanel({
   side,
   title,
@@ -22,6 +20,7 @@ function SidePanel({
   onHide,
   scrollRef,
   onScroll,
+  onTextRecognized,
 }: {
   side: PanelSide;
   title: string;
@@ -32,8 +31,30 @@ function SidePanel({
   onHide: () => void;
   scrollRef: React.RefObject<HTMLDivElement>;
   onScroll: () => void;
+  onTextRecognized: (text: string) => void;
 }) {
   const [fileName, setFileName] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleFile = async (file: File) => {
+    setFileName(file.name);
+    setError(null);
+
+    if (!file.type.startsWith("image/")) {
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const text = await transcribeImage(file);
+      onTextRecognized(text);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "تعذّر تفريغ النص من الصورة");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   if (state === "hidden") return null;
 
@@ -89,23 +110,39 @@ function SidePanel({
         {fileName ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-sm text-ink-soft">
             <span>تم استيراد: {fileName}</span>
-            <span className="text-xs opacity-70">
-              (معاينة الصفحات ستُبنى في مرحلة لاحقة)
-            </span>
+            {busy && <span className="text-xs text-bronze">جارٍ التفريغ النصي…</span>}
+            {error && <span className="text-xs text-red-700">{error}</span>}
+            {!busy && !error && (
+              <span className="text-xs opacity-70">
+                (معاينة الصفحة نفسها ستُبنى لاحقًا — النص المفرّغ أُرسل إلى لوح
+                التحقيق
+              </span>
+            )}
+            <label className="mt-2 cursor-pointer text-xs text-bronze underline">
+              استيراد صورة أخرى
+              <input
+                type="file"
+                accept=".pdf,.zip,image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) handleFile(f);
+                }}
+              />
+            </label>
           </div>
         ) : (
           <label className="flex h-full min-h-[220px] cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border text-center text-sm text-ink-soft transition-colors hover:border-bronze hover:text-ink">
             <span className="text-2xl">＋</span>
             <span>استيراد كتاب كامل</span>
-            <span className="text-xs opacity-70">PDF، ملف مضغوط، أو مجلد صور</span>
+            <span className="text-xs opacity-70">PDF، ملف مضغوط، أو صورة صفحة</span>
             <input
               type="file"
               accept=".pdf,.zip,image/*"
-              multiple
               className="hidden"
               onChange={(e) => {
                 const f = e.target.files?.[0];
-                if (f) setFileName(f.name);
+                if (f) handleFile(f);
               }}
             />
           </label>
@@ -115,9 +152,6 @@ function SidePanel({
   );
 }
 
-/** Drag handle between the center text panel and a side panel. Only ever
- * resizes the side panel's width, so the center panel's minimum is never
- * violated. */
 function ResizeHandle({ onDrag }: { onDrag: (deltaX: number) => void }) {
   const dragging = useRef(false);
   const lastX = useRef(0);
@@ -168,9 +202,6 @@ export default function App() {
   const clamp = (v: number, min: number, max: number) =>
     Math.min(max, Math.max(min, v));
 
-  // RTL layout: manuscript sits on the visual right, printed text on the
-  // visual left, center panel between them. Dragging toward the center
-  // shrinks the side panel; dragging away grows it.
   const handleManuscriptDrag = useCallback((deltaX: number) => {
     setManuscriptWidth((w) => clamp(w - deltaX, MIN_SIDE_WIDTH, MAX_SIDE_WIDTH));
   }, []);
@@ -188,6 +219,11 @@ export default function App() {
     dst.scrollTop = ratio * Math.max(1, dst.scrollHeight - dst.clientHeight);
   };
 
+  const appendRecognizedText = useCallback((recognized: string) => {
+    if (!recognized.trim()) return;
+    setText((prev) => (prev ? `${prev}\n\n${recognized}` : recognized));
+  }, []);
+
   const wordCount = useMemo(
     () => (text.trim() ? text.trim().split(/\s+/).length : 0),
     [text]
@@ -196,7 +232,6 @@ export default function App() {
 
   return (
     <div className="flex h-screen flex-col bg-paper font-ui">
-      {/* Header */}
       <header className="flex items-center justify-between border-b border-border bg-paper px-5 py-3">
         <h1 className="font-naskh text-xl font-bold text-ink">مساعد المحقق الذكي</h1>
 
@@ -233,7 +268,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* Workspace: manuscript (right) — text (center, always present) — printed (left) */}
       <main className="flex flex-1 gap-2 overflow-hidden p-3">
         <SidePanel
           side="right"
@@ -245,14 +279,13 @@ export default function App() {
           onHide={() => setManuscriptState("hidden")}
           scrollRef={manuscriptScrollRef}
           onScroll={() => syncFromPanel("manuscript")}
+          onTextRecognized={appendRecognizedText}
         />
 
         {manuscriptState === "expanded" && (
           <ResizeHandle onDrag={handleManuscriptDrag} />
         )}
 
-        {/* Center text panel — the primary panel. Always rendered, never
-            hidden; only its width changes via the side drag handles. */}
         <div
           className="flex min-w-0 flex-1 flex-col rounded-xl border border-border bg-white/50"
           style={{ minWidth: MIN_CENTER_WIDTH }}
@@ -289,6 +322,7 @@ export default function App() {
           onHide={() => setPrintedState("hidden")}
           scrollRef={printedScrollRef}
           onScroll={() => syncFromPanel("printed")}
+          onTextRecognized={appendRecognizedText}
         />
       </main>
     </div>
