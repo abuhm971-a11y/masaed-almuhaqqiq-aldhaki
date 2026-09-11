@@ -26,3 +26,15 @@ export async function transcribeImage(file: File): Promise<string> {
   if (data?.error) throw new Error(data.error);
   return data?.text ?? "";
 }
+
+export async function assistText(
+  text: string,
+  action: "tashkeel" | "tasheeh" | "hamzat" | "tarqeem" | "faharis"
+): Promise<string> {
+  const { data, error } = await supabase.functions.invoke("assist", {
+    body: { text, action },
+  });
+  if (error) throw error;
+  if (data?.error) throw new Error(data.error);
+  return data?.text ?? "";
+}
