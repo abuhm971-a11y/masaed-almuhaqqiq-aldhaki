@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { transcribeImage } from "./lib/supabaseClient";
+import { transcribeImage, assistText } from "./lib/supabaseClient";
 
 type SyncMode = "independent" | "manuscript" | "printed";
 type PanelSide = "right" | "left";
@@ -9,6 +9,25 @@ const MIN_CENTER_WIDTH = 360;
 const DEFAULT_SIDE_WIDTH = 340;
 const MIN_SIDE_WIDTH = 220;
 const MAX_SIDE_WIDTH = 640;
+
+const SPECIAL_CHARS = ["﴿", "﴾", "«", "»", "[", "]", "(", ")", "…"];
+
+const FOOTNOTE_CATEGORIES = [
+  { key: "takhrij", label: "التخريج والعزو" },
+  { key: "furuq", label: "فروق النسخ" },
+  { key: "gharib", label: "شرح الغريب" },
+  { key: "tahqiq", label: "تعليقات المحقق" },
+] as const;
+
+type FootnoteCategoryKey = (typeof FOOTNOTE_CATEGORIES)[number]["key"];
+
+const ASSIST_ACTIONS = [
+  { key: "tashkeel", label: "تشكيل" },
+  { key: "tasheeh", label: "تصحيح" },
+  { key: "hamzat", label: "توحيد الهمزات" },
+  { key: "tarqeem", label: "ترقيم" },
+  { key: "faharis", label: "فهارس" },
+] as const;
 
 function SidePanel({
   side,
@@ -114,8 +133,8 @@ function SidePanel({
             {error && <span className="text-xs text-red-700">{error}</span>}
             {!busy && !error && (
               <span className="text-xs opacity-70">
-                (معاينة الصفحة نفسها ستُبنى لاحقًا — النص المفرّغ أُرسل إلى لوح
-                التحقيق
+                (معاينة الصفحة نفسها ستُبنى لاحقًا — النص المفرَّغ أُرسل إلى لوح
+                التحقيق)
               </span>
             )}
             <label className="mt-2 cursor-pointer text-xs text-bronze underline">
@@ -148,6 +167,126 @@ function SidePanel({
           </label>
         )}
       </div>
+    </div>
+  );
+}
+
+function SpecialCharsToolbar({ onInsert }: { onInsert: (ch: string) => void }) {
+  return (
+    <div className="flex items-center gap-1 border-b border-border bg-paper-dim/40 px-3 py-1.5">
+      {SPECIAL_CHARS.map((ch) => (
+        <button
+          key={ch}
+          onClick={() => onInsert(ch)}
+          className="min-w-[28px] rounded-md px-1.5 py-0.5 font-naskh text-base text-ink hover:bg-white/60"
+          title={`إدراج ${ch}`}
+        >
+          {ch}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function FootnotesPanel({
+  counts,
+  onInsert,
+}: {
+  counts: Record<FootnoteCategoryKey, number>;
+  onInsert: (categoryKey: FootnoteCategoryKey) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-t border-border bg-paper-dim/40 px-3 py-2">
+      <span className="text-xs font-semibold text-ink-soft">حواشي المتن:</span>
+      {FOOTNOTE_CATEGORIES.map((cat) => (
+        <button
+          key={cat.key}
+          onClick={() => onInsert(cat.key)}
+          className="flex items-center gap-1.5 rounded-full border border-border bg-white/60 px-3 py-1 text-xs text-ink hover:bg-white"
+          title={`إدراج حاشية: ${cat.label}`}
+        >
+          <span>{cat.label}</span>
+          <span className="rounded-full bg-bronze-light/50 px-1.5 text-[10px] text-ink">
+            {counts[cat.key]}
+          </span>
+          <span className="text-bronze">＋</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function AssistToolbar({
+  text,
+  onApply,
+}: {
+  text: string;
+  onApply: (newText: string) => void;
+}) {
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [result, setResult] = useState<{ action: string; text: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async (action: (typeof ASSIST_ACTIONS)[number]) => {
+    if (!text.trim()) return;
+    setBusyAction(action.key);
+    setError(null);
+    setResult(null);
+    try {
+      const resultText = await assistText(text, action.key);
+      setResult({ action: action.label, text: resultText });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "تعذّر تنفيذ الإجراء");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  return (
+    <div className="border-t border-border bg-paper-dim/60 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold text-ink-soft">مساعد المحقق:</span>
+        {ASSIST_ACTIONS.map((action) => (
+          <button
+            key={action.key}
+            onClick={() => run(action)}
+            disabled={busyAction !== null}
+            className="rounded-md border border-border bg-white/60 px-3 py-1 text-xs text-ink hover:bg-white disabled:opacity-50"
+          >
+            {busyAction === action.key ? "جارٍ التنفيذ…" : action.label}
+          </button>
+        ))}
+      </div>
+
+      {error && <p className="mt-2 text-xs text-red-700">{error}</p>}
+
+      {result && (
+        <div className="mt-2 rounded-lg border border-border bg-white/70 p-3">
+          <p className="mb-1 text-xs font-semibold text-ink-soft">
+            نتيجة "{result.action}" — راجعها قبل التطبيق:
+          </p>
+          <p dir="rtl" className="max-h-32 overflow-auto whitespace-pre-wrap font-naskh text-sm text-ink">
+            {result.text}
+          </p>
+          <div className="mt-2 flex gap-2">
+            <button
+              onClick={() => {
+                onApply(result.text);
+                setResult(null);
+              }}
+              className="rounded-md bg-bronze px-3 py-1 text-xs text-white hover:bg-bronze/90"
+            >
+              تطبيق على النص
+            </button>
+            <button
+              onClick={() => setResult(null)}
+              className="rounded-md border border-border px-3 py-1 text-xs text-ink-soft hover:bg-paper-dim"
+            >
+              تجاهل
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -194,6 +333,12 @@ export default function App() {
   const [printedWidth, setPrintedWidth] = useState(DEFAULT_SIDE_WIDTH);
   const [syncMode, setSyncMode] = useState<SyncMode>("independent");
   const [text, setText] = useState("");
+  const [footnoteCounts, setFootnoteCounts] = useState<Record<FootnoteCategoryKey, number>>({
+    takhrij: 0,
+    furuq: 0,
+    gharib: 0,
+    tahqiq: 0,
+  });
 
   const manuscriptScrollRef = useRef<HTMLDivElement>(null);
   const printedScrollRef = useRef<HTMLDivElement>(null);
@@ -223,6 +368,30 @@ export default function App() {
     if (!recognized.trim()) return;
     setText((prev) => (prev ? `${prev}\n\n${recognized}` : recognized));
   }, []);
+
+  const insertAtCursor = useCallback((insert: string) => {
+    const el = centerScrollRef.current;
+    if (!el) {
+      setText((prev) => prev + insert);
+      return;
+    }
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? el.value.length;
+    setText((prev) => prev.slice(0, start) + insert + prev.slice(end));
+    requestAnimationFrame(() => {
+      el.focus();
+      const caret = start + insert.length;
+      el.setSelectionRange(caret, caret);
+    });
+  }, []);
+
+  const insertFootnote = useCallback((categoryKey: FootnoteCategoryKey) => {
+    setFootnoteCounts((prev) => {
+      const nextIndex = prev[categoryKey] + 1;
+      insertAtCursor(`[${categoryKey}:${nextIndex}]`);
+      return { ...prev, [categoryKey]: nextIndex };
+    });
+  }, [insertAtCursor]);
 
   const wordCount = useMemo(
     () => (text.trim() ? text.trim().split(/\s+/).length : 0),
@@ -298,6 +467,7 @@ export default function App() {
               الكلمات: {wordCount} — الحروف: {charCount}
             </span>
           </div>
+          <SpecialCharsToolbar onInsert={insertAtCursor} />
           <textarea
             ref={centerScrollRef}
             value={text}
@@ -306,6 +476,8 @@ export default function App() {
             placeholder="ابدأ كتابة نص التحقيق هنا…"
             className="flex-1 resize-none bg-transparent p-5 font-naskh text-lg leading-loose text-ink outline-none placeholder:text-ink-soft/60"
           />
+          <FootnotesPanel counts={footnoteCounts} onInsert={insertFootnote} />
+          <AssistToolbar text={text} onApply={setText} />
         </div>
 
         {printedState === "expanded" && (
