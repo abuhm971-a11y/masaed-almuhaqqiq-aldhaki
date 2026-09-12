@@ -21,6 +21,14 @@ const FOOTNOTE_CATEGORIES = [
 
 type FootnoteCategoryKey = (typeof FOOTNOTE_CATEGORIES)[number]["key"];
 
+type FootnoteEntry = {
+  id: string;
+  category: FootnoteCategoryKey;
+  index: number;
+  text: string;
+  includeInPrint: boolean;
+};
+
 const ASSIST_ACTIONS = [
   { key: "tashkeel", label: "تشكيل" },
   { key: "tasheeh", label: "تصحيح" },
@@ -29,6 +37,50 @@ const ASSIST_ACTIONS = [
   { key: "faharis", label: "فهارس" },
 ] as const;
 
+/** Crops a double-page-spread image into its right and left halves at
+ * `splitPercent` (0-100, measured from the visual left edge), following
+ * the same manual-split-line approach used by book-scan tools like
+ * ScanTailor. Returns two PNG data URLs. */
+function cropImageHalves(
+  imageUrl: string,
+  splitPercent: number
+): Promise<{ left: string; right: string }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const splitX = Math.round((img.naturalWidth * splitPercent) / 100);
+      const makeCrop = (sx: number, sw: number) => {
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, sw);
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("تعذّر إنشاء لوحة الرسم لقص الصورة");
+        ctx.drawImage(img, sx, 0, sw, img.naturalHeight, 0, 0, sw, img.naturalHeight);
+        return canvas.toDataURL("image/png");
+      };
+      try {
+        resolve({
+          left: makeCrop(0, splitX),
+          right: makeCrop(splitX, img.naturalWidth - splitX),
+        });
+      } catch (err) {
+        reject(err);
+      }
+    };
+    img.onerror = () => reject(new Error("تعذّر تحميل الصورة للقص"));
+    img.src = imageUrl;
+  });
+}
+
+async function dataUrlToFile(dataUrl: string, filename: string): Promise<File> {
+  const res = await fetch(dataUrl);
+  const blob = await res.blob();
+  return new File([blob], filename, { type: blob.type });
+}
+
+/** A side panel (manuscript image or printed image). Collapses to a closed
+ * vertical strip and can be hidden entirely. Never affects the center panel's
+ * guaranteed minimum width. */
 function SidePanel({
   side,
   title,
@@ -56,13 +108,35 @@ function SidePanel({
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [description, setDescription] = useState("");
+  const [splitMode, setSplitMode] = useState(false);
+  const [splitX, setSplitX] = useState(50);
+  const [crops, setCrops] = useState<{ left: string; right: string } | null>(null);
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const draggingSplit = useRef(false);
+
+  const runTranscription = async (file: File) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const recognized = await transcribeImage(file);
+      onTextRecognized(recognized);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "تعذّر تفريغ النص من الصورة");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleFile = async (file: File) => {
     setFileName(file.name);
     setError(null);
+    setCrops(null);
+    setSplitMode(false);
 
     if (!file.type.startsWith("image/")) {
       setImageUrl(null);
+      // PDF/ZIP splitting into pages isn't built yet — see README.
       return;
     }
 
@@ -71,15 +145,53 @@ function SidePanel({
       return URL.createObjectURL(file);
     });
 
-    setBusy(true);
+    await runTranscription(file);
+  };
+
+  const onSplitDragStart = () => {
+    draggingSplit.current = true;
+    document.body.style.cursor = "col-resize";
+
+    const onMove = (ev: MouseEvent) => {
+      if (!draggingSplit.current || !splitContainerRef.current) return;
+      const rect = splitContainerRef.current.getBoundingClientRect();
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      setSplitX(Math.min(95, Math.max(5, pct)));
+    };
+    const onUp = () => {
+      draggingSplit.current = false;
+      document.body.style.cursor = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  const runSplit = async () => {
+    if (!imageUrl) return;
+    setError(null);
     try {
-      const text = await transcribeImage(file);
-      onTextRecognized(text);
+      setCrops(await cropImageHalves(imageUrl, splitX));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "تعذّر تفريغ النص من الصورة");
-    } finally {
-      setBusy(false);
+      setError(err instanceof Error ? err.message : "تعذّر تقطيع الصورة");
     }
+  };
+
+  const useCrop = async (which: "left" | "right") => {
+    if (!crops) return;
+    const file = await dataUrlToFile(
+      crops[which],
+      `${(fileName ?? "page").replace(/\.[^.]+$/, "")}-${which}.png`
+    );
+    setImageUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return URL.createObjectURL(file);
+    });
+    setFileName(file.name);
+    setCrops(null);
+    setSplitMode(false);
+    await runTranscription(file);
   };
 
   if (state === "hidden") return null;
@@ -135,17 +247,79 @@ function SidePanel({
       >
         {fileName ? (
           <div className="flex h-full flex-col items-center gap-2 text-center text-sm text-ink-soft">
-            {imageUrl && (
+            {imageUrl && !splitMode && !crops && (
               <img
                 src={imageUrl}
                 alt={fileName}
-                className="max-h-[70%] w-full rounded-md border border-border object-contain"
+                className="max-h-[50%] w-full rounded-md border border-border object-contain"
               />
             )}
+
+            {imageUrl && splitMode && !crops && (
+              <div className="w-full">
+                <div ref={splitContainerRef} className="relative w-full select-none">
+                  <img src={imageUrl} alt={fileName} className="w-full rounded-md border border-border" />
+                  <div
+                    onMouseDown={onSplitDragStart}
+                    className="absolute top-0 h-full w-1.5 cursor-col-resize bg-bronze"
+                    style={{ left: `${splitX}%` }}
+                    title="اسحب لتحديد خط القص بين الوجهين"
+                  />
+                </div>
+                <div className="mt-2 flex justify-center gap-2">
+                  <button
+                    onClick={runSplit}
+                    className="rounded-md bg-bronze px-3 py-1 text-xs text-white hover:bg-bronze/90"
+                  >
+                    تنفيذ القص
+                  </button>
+                  <button
+                    onClick={() => setSplitMode(false)}
+                    className="rounded-md border border-border px-3 py-1 text-xs text-ink-soft hover:bg-paper-dim"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {crops && (
+              <div className="flex w-full gap-2">
+                <div className="flex-1">
+                  <img src={crops.right} alt="الوجه الأيمن" className="w-full rounded-md border border-border" />
+                  <button
+                    onClick={() => useCrop("right")}
+                    className="mt-1 w-full rounded-md bg-bronze px-2 py-1 text-[11px] text-white hover:bg-bronze/90"
+                  >
+                    استخدام الوجه الأيمن
+                  </button>
+                </div>
+                <div className="flex-1">
+                  <img src={crops.left} alt="الوجه الأيسر" className="w-full rounded-md border border-border" />
+                  <button
+                    onClick={() => useCrop("left")}
+                    className="mt-1 w-full rounded-md bg-bronze px-2 py-1 text-[11px] text-white hover:bg-bronze/90"
+                  >
+                    استخدام الوجه الأيسر
+                  </button>
+                </div>
+              </div>
+            )}
+
             <span className="text-xs">{fileName}</span>
             {busy && <span className="text-xs text-bronze">جارٍ التفريغ النصي…</span>}
             {error && <span className="text-xs text-red-700">{error}</span>}
-            <label className="mt-1 cursor-pointer text-xs text-bronze underline">
+
+            {imageUrl && !splitMode && !crops && (
+              <button
+                onClick={() => setSplitMode(true)}
+                className="text-xs text-bronze underline"
+              >
+                قص الصورة إلى صفحتين
+              </button>
+            )}
+
+            <label className="cursor-pointer text-xs text-bronze underline">
               استيراد صورة أخرى
               <input
                 type="file"
@@ -157,6 +331,15 @@ function SidePanel({
                 }}
               />
             </label>
+
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              dir="rtl"
+              placeholder="وصف أو تعليق على هذه الصورة…"
+              rows={2}
+              className="w-full rounded-md border border-border bg-white/50 p-2 text-xs text-ink outline-none placeholder:text-ink-soft/50"
+            />
           </div>
         ) : (
           <label className="flex h-full min-h-[220px] cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border text-center text-sm text-ink-soft transition-colors hover:border-bronze hover:text-ink">
@@ -179,6 +362,7 @@ function SidePanel({
   );
 }
 
+/** Quick-insert toolbar for classical Arabic editing marks. */
 function SpecialCharsToolbar({ onInsert }: { onInsert: (ch: string) => void }) {
   return (
     <div className="flex items-center gap-1 border-b border-border bg-paper-dim/40 px-3 py-1.5">
@@ -196,34 +380,84 @@ function SpecialCharsToolbar({ onInsert }: { onInsert: (ch: string) => void }) {
   );
 }
 
+/** The four fixed footnote categories, with insert buttons and an editable
+ * list of every footnote entered so far. Each entry has a checkbox that
+ * controls whether it's included ("مُثبَتة") when the document is printed —
+ * unchecking it never deletes the marker from the text, only excludes it
+ * from print output. */
 function FootnotesPanel({
-  counts,
+  entries,
   onInsert,
+  onChangeText,
+  onToggleInclude,
 }: {
-  counts: Record<FootnoteCategoryKey, number>;
+  entries: FootnoteEntry[];
   onInsert: (categoryKey: FootnoteCategoryKey) => void;
+  onChangeText: (id: string, text: string) => void;
+  onToggleInclude: (id: string) => void;
 }) {
+  const countFor = (key: FootnoteCategoryKey) =>
+    entries.filter((e) => e.category === key).length;
+
   return (
-    <div className="flex flex-wrap items-center gap-2 border-t border-border bg-paper-dim/40 px-3 py-2">
-      <span className="text-xs font-semibold text-ink-soft">حواشي المتن:</span>
-      {FOOTNOTE_CATEGORIES.map((cat) => (
-        <button
-          key={cat.key}
-          onClick={() => onInsert(cat.key)}
-          className="flex items-center gap-1.5 rounded-full border border-border bg-white/60 px-3 py-1 text-xs text-ink hover:bg-white"
-          title={`إدراج حاشية: ${cat.label}`}
-        >
-          <span>{cat.label}</span>
-          <span className="rounded-full bg-bronze-light/50 px-1.5 text-[10px] text-ink">
-            {counts[cat.key]}
-          </span>
-          <span className="text-bronze">＋</span>
-        </button>
-      ))}
+    <div className="border-t border-border bg-paper-dim/40">
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+        <span className="text-xs font-semibold text-ink-soft">حواشي المتن:</span>
+        {FOOTNOTE_CATEGORIES.map((cat) => (
+          <button
+            key={cat.key}
+            id={`footnote-insert-${cat.key}`}
+            onClick={() => onInsert(cat.key)}
+            className="flex items-center gap-1.5 rounded-full border border-border bg-white/60 px-3 py-1 text-xs text-ink hover:bg-white"
+            title={`إدراج حاشية: ${cat.label}`}
+          >
+            <span>{cat.label}</span>
+            <span className="rounded-full bg-bronze-light/50 px-1.5 text-[10px] text-ink">
+              {countFor(cat.key)}
+            </span>
+            <span className="text-bronze">＋</span>
+          </button>
+        ))}
+      </div>
+
+      {entries.length > 0 && (
+        <div className="max-h-32 overflow-auto border-t border-border/60 px-3 py-2">
+          {entries.map((entry) => {
+            const label = FOOTNOTE_CATEGORIES.find((c) => c.key === entry.category)!.label;
+            return (
+              <div key={entry.id} className="mb-1.5 flex items-center gap-2 last:mb-0">
+                <input
+                  type="checkbox"
+                  checked={entry.includeInPrint}
+                  onChange={() => onToggleInclude(entry.id)}
+                  title="إثبات هذه الحاشية عند الطباعة"
+                  className="h-3.5 w-3.5 accent-bronze"
+                />
+                <span className="w-24 shrink-0 text-[11px] text-ink-soft">
+                  {label} #{entry.index}
+                </span>
+                <input
+                  id={`footnote-input-${entry.id}`}
+                  type="text"
+                  dir="rtl"
+                  value={entry.text}
+                  onChange={(e) => onChangeText(entry.id, e.target.value)}
+                  placeholder="نص الحاشية…"
+                  className={`flex-1 rounded-md border border-border bg-white/60 px-2 py-1 text-xs text-ink outline-none ${
+                    entry.includeInPrint ? "" : "opacity-50"
+                  }`}
+                />
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
 
+/** Five quick AI actions on the whole manuscript text. Results are shown
+ * for review — nothing overwrites the text panel until the user applies it. */
 function AssistToolbar({
   getText,
   onApply,
@@ -300,6 +534,9 @@ function AssistToolbar({
   );
 }
 
+/** Drag handle between the center text panel and a side panel. Only ever
+ * resizes the side panel's width, so the center panel's minimum is never
+ * violated. */
 function ResizeHandle({ onDrag }: { onDrag: (deltaX: number) => void }) {
   const dragging = useRef(false);
   const lastX = useRef(0);
@@ -341,12 +578,7 @@ export default function App() {
   const [manuscriptWidth, setManuscriptWidth] = useState(DEFAULT_SIDE_WIDTH);
   const [printedWidth, setPrintedWidth] = useState(DEFAULT_SIDE_WIDTH);
   const [syncMode, setSyncMode] = useState<SyncMode>("independent");
-  const [footnoteCounts, setFootnoteCounts] = useState<Record<FootnoteCategoryKey, number>>({
-    takhrij: 0,
-    furuq: 0,
-    gharib: 0,
-    tahqiq: 0,
-  });
+  const [footnotes, setFootnotes] = useState<FootnoteEntry[]>([]);
 
   const manuscriptScrollRef = useRef<HTMLDivElement>(null);
   const printedScrollRef = useRef<HTMLDivElement>(null);
@@ -357,6 +589,9 @@ export default function App() {
   const clamp = (v: number, min: number, max: number) =>
     Math.min(max, Math.max(min, v));
 
+  // RTL layout: manuscript sits on the visual right, printed text on the
+  // visual left, center panel between them. Dragging toward the center
+  // shrinks the side panel; dragging away grows it.
   const handleManuscriptDrag = useCallback((deltaX: number) => {
     setManuscriptWidth((w) => clamp(w - deltaX, MIN_SIDE_WIDTH, MAX_SIDE_WIDTH));
   }, []);
@@ -385,6 +620,8 @@ export default function App() {
     dst.scrollTop = ratio * Math.max(1, dst.scrollHeight - dst.clientHeight);
   };
 
+  /** Places the caret at the very end of the editor. Used when there is no
+   * live text selection to insert at (e.g. after importing an image). */
   const placeCaretAtEnd = (el: HTMLElement) => {
     const range = document.createRange();
     range.selectNodeContents(el);
@@ -394,6 +631,8 @@ export default function App() {
     sel?.addRange(range);
   };
 
+  /** Inserts a plain-text node at the current caret position inside the
+   * editor (falls back to the end if the editor isn't focused/selected). */
   const insertAtCursor = useCallback((insertText: string) => {
     const el = editorRef.current;
     if (!el) return;
@@ -418,12 +657,15 @@ export default function App() {
     recomputeCounts();
   }, [recomputeCounts]);
 
+  /** Inserts a non-editable superscript footnote marker token at the
+   * caret, followed by a zero-width space so typing can continue after it. */
   const insertFootnote = useCallback((categoryKey: FootnoteCategoryKey) => {
     const el = editorRef.current;
     if (!el) return;
 
-    const nextIndex = footnoteCounts[categoryKey] + 1;
+    const nextIndex = footnotes.filter((f) => f.category === categoryKey).length + 1;
     const label = FOOTNOTE_CATEGORIES.find((c) => c.key === categoryKey)!.label;
+    const id = `fn-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
     const sel = window.getSelection();
     const selectionInsideEditor =
@@ -435,27 +677,50 @@ export default function App() {
 
     const marker = document.createElement("sup");
     marker.contentEditable = "false";
-    marker.dataset.category = categoryKey;
-    marker.dataset.index = String(nextIndex);
-    marker.title = `${label} #${nextIndex}`;
+    marker.dataset.footnoteId = id;
+    marker.title = `${label} #${nextIndex} — انقر لتحرير نصها`;
     marker.className =
-      "mx-0.5 cursor-help rounded bg-bronze-light/60 px-1 text-[11px] font-ui text-ink";
+      "mx-0.5 cursor-pointer rounded bg-bronze-light/60 px-1 text-[11px] font-ui text-ink hover:bg-bronze-light";
     marker.textContent = String(nextIndex);
+    marker.addEventListener("click", () => {
+      const input = document.getElementById(`footnote-input-${id}`) as HTMLInputElement | null;
+      input?.scrollIntoView({ block: "nearest" });
+      input?.focus();
+    });
 
     const spacer = document.createTextNode("\u200b");
 
     const range = window.getSelection()!.getRangeAt(0);
     range.deleteContents();
-    range.insertNode(spacer);
-    range.insertNode(marker);
+    // Insert both nodes atomically, in order, so a second insertNode call
+    // can't re-collapse the range and reverse their order.
+    const frag = document.createDocumentFragment();
+    frag.appendChild(marker);
+    frag.appendChild(spacer);
+    range.insertNode(frag);
+    // Position the caret using the actual spacer node reference — safe
+    // regardless of how the range's own boundary was left after insertNode.
     range.setStartAfter(spacer);
     range.setEndAfter(spacer);
     window.getSelection()!.removeAllRanges();
     window.getSelection()!.addRange(range);
 
     recomputeCounts();
-    setFootnoteCounts((prev) => ({ ...prev, [categoryKey]: nextIndex }));
-  }, [footnoteCounts, recomputeCounts]);
+    setFootnotes((prev) => [
+      ...prev,
+      { id, category: categoryKey, index: nextIndex, text: "", includeInPrint: true },
+    ]);
+  }, [footnotes, recomputeCounts]);
+
+  const updateFootnoteText = useCallback((id: string, text: string) => {
+    setFootnotes((prev) => prev.map((f) => (f.id === id ? { ...f, text } : f)));
+  }, []);
+
+  const toggleFootnoteInclude = useCallback((id: string) => {
+    setFootnotes((prev) =>
+      prev.map((f) => (f.id === id ? { ...f, includeInPrint: !f.includeInPrint } : f))
+    );
+  }, []);
 
   const appendRecognizedText = useCallback((recognized: string) => {
     if (!recognized.trim()) return;
@@ -467,6 +732,8 @@ export default function App() {
     insertAtCursor(recognized);
   }, [insertAtCursor]);
 
+  /** Full-text AI actions replace the whole editable body with plain text
+   * (footnote markers are not preserved through this operation yet). */
   const replaceAllText = useCallback((newText: string) => {
     const el = editorRef.current;
     if (!el) return;
@@ -476,6 +743,7 @@ export default function App() {
 
   return (
     <div className="flex h-screen flex-col bg-paper font-ui">
+      {/* Header */}
       <header className="flex items-center justify-between border-b border-border bg-paper px-5 py-3">
         <h1 className="font-naskh text-xl font-bold text-ink">مساعد المحقق الذكي</h1>
 
@@ -512,6 +780,7 @@ export default function App() {
         </div>
       </header>
 
+      {/* Workspace: manuscript (right) — text (center, always present) — printed (left) */}
       <main className="flex flex-1 gap-2 overflow-hidden p-3">
         <SidePanel
           side="right"
@@ -530,6 +799,8 @@ export default function App() {
           <ResizeHandle onDrag={handleManuscriptDrag} />
         )}
 
+        {/* Center text panel — the primary panel. Always rendered, never
+            hidden; only its width changes via the side drag handles. */}
         <div
           className="flex min-w-0 flex-1 flex-col rounded-xl border border-border bg-white/50"
           style={{ minWidth: MIN_CENTER_WIDTH }}
@@ -558,7 +829,12 @@ export default function App() {
               className="h-full min-h-full whitespace-pre-wrap bg-transparent p-5 font-naskh text-lg leading-loose text-ink outline-none"
             />
           </div>
-          <FootnotesPanel counts={footnoteCounts} onInsert={insertFootnote} />
+          <FootnotesPanel
+            entries={footnotes}
+            onInsert={insertFootnote}
+            onChangeText={updateFootnoteText}
+            onToggleInclude={toggleFootnoteInclude}
+          />
           <AssistToolbar
             getText={() => editorRef.current?.innerText ?? ""}
             onApply={replaceAllText}
