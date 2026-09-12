@@ -331,15 +331,6 @@ function SidePanel({
                 }}
               />
             </label>
-
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              dir="rtl"
-              placeholder="وصف أو تعليق على هذه الصورة…"
-              rows={2}
-              className="w-full rounded-md border border-border bg-white/50 p-2 text-xs text-ink outline-none placeholder:text-ink-soft/50"
-            />
           </div>
         ) : (
           <label className="flex h-full min-h-[220px] cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border text-center text-sm text-ink-soft transition-colors hover:border-bronze hover:text-ink">
@@ -357,6 +348,15 @@ function SidePanel({
             />
           </label>
         )}
+
+        <textarea
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          dir="rtl"
+          placeholder="وصف أو تعليق على هذه الصورة…"
+          rows={2}
+          className="mt-2 w-full rounded-md border border-border bg-white/50 p-2 text-xs text-ink outline-none placeholder:text-ink-soft/50"
+        />
       </div>
     </div>
   );
@@ -421,31 +421,39 @@ function FootnotesPanel({
       </div>
 
       {entries.length > 0 && (
-        <div className="max-h-32 overflow-auto border-t border-border/60 px-3 py-2">
+        <div className="max-h-64 overflow-auto border-t border-border/60 px-3 py-2">
           {entries.map((entry) => {
             const label = FOOTNOTE_CATEGORIES.find((c) => c.key === entry.category)!.label;
             return (
-              <div key={entry.id} className="mb-1.5 flex items-center gap-2 last:mb-0">
-                <input
-                  type="checkbox"
-                  checked={entry.includeInPrint}
-                  onChange={() => onToggleInclude(entry.id)}
-                  title="إثبات هذه الحاشية عند الطباعة"
-                  className="h-3.5 w-3.5 accent-bronze"
-                />
-                <span className="w-24 shrink-0 text-[11px] text-ink-soft">
-                  {label} #{entry.index}
-                </span>
-                <input
+              <div
+                key={entry.id}
+                className={`mb-2 rounded-lg border border-border bg-white/70 p-2 last:mb-0 ${
+                  entry.includeInPrint ? "" : "opacity-50"
+                }`}
+              >
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="text-xs font-semibold text-ink-soft">
+                    {label} #{entry.index}
+                  </span>
+                  <label className="flex items-center gap-1 text-[11px] text-ink-soft">
+                    <span>إثبات في الطباعة</span>
+                    <input
+                      type="checkbox"
+                      checked={entry.includeInPrint}
+                      onChange={() => onToggleInclude(entry.id)}
+                      title="إثبات هذه الحاشية عند الطباعة"
+                      className="h-3.5 w-3.5 accent-bronze"
+                    />
+                  </label>
+                </div>
+                <textarea
                   id={`footnote-input-${entry.id}`}
-                  type="text"
                   dir="rtl"
+                  rows={2}
                   value={entry.text}
                   onChange={(e) => onChangeText(entry.id, e.target.value)}
-                  placeholder="نص الحاشية…"
-                  className={`flex-1 rounded-md border border-border bg-white/60 px-2 py-1 text-xs text-ink outline-none ${
-                    entry.includeInPrint ? "" : "opacity-50"
-                  }`}
+                  placeholder="اكتب نص الحاشية هنا…"
+                  className="w-full resize-y rounded-md border border-border bg-white/80 p-2 font-naskh text-base leading-relaxed text-ink outline-none placeholder:text-ink-soft/50"
                 />
               </div>
             );
@@ -683,7 +691,7 @@ export default function App() {
       "mx-0.5 cursor-pointer rounded bg-bronze-light/60 px-1 text-[11px] font-ui text-ink hover:bg-bronze-light";
     marker.textContent = String(nextIndex);
     marker.addEventListener("click", () => {
-      const input = document.getElementById(`footnote-input-${id}`) as HTMLInputElement | null;
+      const input = document.getElementById(`footnote-input-${id}`) as HTMLTextAreaElement | null;
       input?.scrollIntoView({ block: "nearest" });
       input?.focus();
     });
