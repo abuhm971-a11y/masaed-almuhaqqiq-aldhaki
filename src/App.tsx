@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { transcribeImage, assistText } from "./lib/supabaseClient";
 
 type SyncMode = "independent" | "manuscript" | "printed";
@@ -53,6 +53,7 @@ function SidePanel({
   onTextRecognized: (text: string) => void;
 }) {
   const [fileName, setFileName] = useState<string | null>(null);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -61,8 +62,14 @@ function SidePanel({
     setError(null);
 
     if (!file.type.startsWith("image/")) {
+      setImageUrl(null);
       return;
     }
+
+    setImageUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return URL.createObjectURL(file);
+    });
 
     setBusy(true);
     try {
@@ -127,17 +134,18 @@ function SidePanel({
         className="flex-1 overflow-auto p-3"
       >
         {fileName ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-sm text-ink-soft">
-            <span>تم استيراد: {fileName}</span>
+          <div className="flex h-full flex-col items-center gap-2 text-center text-sm text-ink-soft">
+            {imageUrl && (
+              <img
+                src={imageUrl}
+                alt={fileName}
+                className="max-h-[70%] w-full rounded-md border border-border object-contain"
+              />
+            )}
+            <span className="text-xs">{fileName}</span>
             {busy && <span className="text-xs text-bronze">جارٍ التفريغ النصي…</span>}
             {error && <span className="text-xs text-red-700">{error}</span>}
-            {!busy && !error && (
-              <span className="text-xs opacity-70">
-                (معاينة الصفحة نفسها ستُبنى لاحقًا — النص المفرَّغ أُرسل إلى لوح
-                التحقيق)
-              </span>
-            )}
-            <label className="mt-2 cursor-pointer text-xs text-bronze underline">
+            <label className="mt-1 cursor-pointer text-xs text-bronze underline">
               استيراد صورة أخرى
               <input
                 type="file"
@@ -217,10 +225,10 @@ function FootnotesPanel({
 }
 
 function AssistToolbar({
-  text,
+  getText,
   onApply,
 }: {
-  text: string;
+  getText: () => string;
   onApply: (newText: string) => void;
 }) {
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -228,6 +236,7 @@ function AssistToolbar({
   const [error, setError] = useState<string | null>(null);
 
   const run = async (action: (typeof ASSIST_ACTIONS)[number]) => {
+    const text = getText();
     if (!text.trim()) return;
     setBusyAction(action.key);
     setError(null);
@@ -332,7 +341,6 @@ export default function App() {
   const [manuscriptWidth, setManuscriptWidth] = useState(DEFAULT_SIDE_WIDTH);
   const [printedWidth, setPrintedWidth] = useState(DEFAULT_SIDE_WIDTH);
   const [syncMode, setSyncMode] = useState<SyncMode>("independent");
-  const [text, setText] = useState("");
   const [footnoteCounts, setFootnoteCounts] = useState<Record<FootnoteCategoryKey, number>>({
     takhrij: 0,
     furuq: 0,
@@ -342,7 +350,9 @@ export default function App() {
 
   const manuscriptScrollRef = useRef<HTMLDivElement>(null);
   const printedScrollRef = useRef<HTMLDivElement>(null);
-  const centerScrollRef = useRef<HTMLTextAreaElement>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
+  const [isEmpty, setIsEmpty] = useState(true);
+  const [counts, setCounts] = useState({ words: 0, chars: 0 });
 
   const clamp = (v: number, min: number, max: number) =>
     Math.min(max, Math.max(min, v));
@@ -354,50 +364,115 @@ export default function App() {
     setPrintedWidth((w) => clamp(w + deltaX, MIN_SIDE_WIDTH, MAX_SIDE_WIDTH));
   }, []);
 
+  const recomputeCounts = useCallback(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    const plain = el.innerText.replace(/\u00a0/g, " ");
+    setIsEmpty(el.innerText.trim().length === 0);
+    setCounts({
+      chars: plain.length,
+      words: plain.trim() ? plain.trim().split(/\s+/).length : 0,
+    });
+  }, []);
+
   const syncFromPanel = (source: "manuscript" | "printed") => {
     if (syncMode !== source) return;
     const src =
       source === "manuscript" ? manuscriptScrollRef.current : printedScrollRef.current;
-    const dst = centerScrollRef.current;
+    const dst = editorRef.current;
     if (!src || !dst) return;
     const ratio = src.scrollTop / Math.max(1, src.scrollHeight - src.clientHeight);
     dst.scrollTop = ratio * Math.max(1, dst.scrollHeight - dst.clientHeight);
   };
 
-  const appendRecognizedText = useCallback((recognized: string) => {
-    if (!recognized.trim()) return;
-    setText((prev) => (prev ? `${prev}\n\n${recognized}` : recognized));
-  }, []);
+  const placeCaretAtEnd = (el: HTMLElement) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  };
 
-  const insertAtCursor = useCallback((insert: string) => {
-    const el = centerScrollRef.current;
-    if (!el) {
-      setText((prev) => prev + insert);
-      return;
-    }
-    const start = el.selectionStart ?? el.value.length;
-    const end = el.selectionEnd ?? el.value.length;
-    setText((prev) => prev.slice(0, start) + insert + prev.slice(end));
-    requestAnimationFrame(() => {
+  const insertAtCursor = useCallback((insertText: string) => {
+    const el = editorRef.current;
+    if (!el) return;
+
+    const sel = window.getSelection();
+    const selectionInsideEditor =
+      sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).commonAncestorContainer);
+    if (!selectionInsideEditor) {
       el.focus();
-      const caret = start + insert.length;
-      el.setSelectionRange(caret, caret);
-    });
-  }, []);
+      placeCaretAtEnd(el);
+    }
+
+    const range = window.getSelection()!.getRangeAt(0);
+    range.deleteContents();
+    const node = document.createTextNode(insertText);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.setEndAfter(node);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+
+    recomputeCounts();
+  }, [recomputeCounts]);
 
   const insertFootnote = useCallback((categoryKey: FootnoteCategoryKey) => {
-    setFootnoteCounts((prev) => {
-      const nextIndex = prev[categoryKey] + 1;
-      insertAtCursor(`[${categoryKey}:${nextIndex}]`);
-      return { ...prev, [categoryKey]: nextIndex };
-    });
+    const el = editorRef.current;
+    if (!el) return;
+
+    const nextIndex = footnoteCounts[categoryKey] + 1;
+    const label = FOOTNOTE_CATEGORIES.find((c) => c.key === categoryKey)!.label;
+
+    const sel = window.getSelection();
+    const selectionInsideEditor =
+      sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).commonAncestorContainer);
+    if (!selectionInsideEditor) {
+      el.focus();
+      placeCaretAtEnd(el);
+    }
+
+    const marker = document.createElement("sup");
+    marker.contentEditable = "false";
+    marker.dataset.category = categoryKey;
+    marker.dataset.index = String(nextIndex);
+    marker.title = `${label} #${nextIndex}`;
+    marker.className =
+      "mx-0.5 cursor-help rounded bg-bronze-light/60 px-1 text-[11px] font-ui text-ink";
+    marker.textContent = String(nextIndex);
+
+    const spacer = document.createTextNode("\u200b");
+
+    const range = window.getSelection()!.getRangeAt(0);
+    range.deleteContents();
+    range.insertNode(spacer);
+    range.insertNode(marker);
+    range.setStartAfter(spacer);
+    range.setEndAfter(spacer);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+
+    recomputeCounts();
+    setFootnoteCounts((prev) => ({ ...prev, [categoryKey]: nextIndex }));
+  }, [footnoteCounts, recomputeCounts]);
+
+  const appendRecognizedText = useCallback((recognized: string) => {
+    if (!recognized.trim()) return;
+    const el = editorRef.current;
+    if (!el) return;
+    el.focus();
+    placeCaretAtEnd(el);
+    if (el.innerText.trim()) insertAtCursor("\n\n");
+    insertAtCursor(recognized);
   }, [insertAtCursor]);
 
-  const wordCount = useMemo(
-    () => (text.trim() ? text.trim().split(/\s+/).length : 0),
-    [text]
-  );
-  const charCount = text.length;
+  const replaceAllText = useCallback((newText: string) => {
+    const el = editorRef.current;
+    if (!el) return;
+    el.innerText = newText;
+    recomputeCounts();
+  }, [recomputeCounts]);
 
   return (
     <div className="flex h-screen flex-col bg-paper font-ui">
@@ -464,20 +539,30 @@ export default function App() {
               نص التحقيق
             </span>
             <span className="text-xs text-ink-soft">
-              الكلمات: {wordCount} — الحروف: {charCount}
+              الكلمات: {counts.words} — الحروف: {counts.chars}
             </span>
           </div>
           <SpecialCharsToolbar onInsert={insertAtCursor} />
-          <textarea
-            ref={centerScrollRef}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            dir="rtl"
-            placeholder="ابدأ كتابة نص التحقيق هنا…"
-            className="flex-1 resize-none bg-transparent p-5 font-naskh text-lg leading-loose text-ink outline-none placeholder:text-ink-soft/60"
-          />
+          <div className="relative flex-1 overflow-auto">
+            {isEmpty && (
+              <span className="pointer-events-none absolute right-5 top-5 font-naskh text-lg text-ink-soft/60">
+                ابدأ كتابة نص التحقيق هنا…
+              </span>
+            )}
+            <div
+              ref={editorRef}
+              contentEditable
+              suppressContentEditableWarning
+              onInput={recomputeCounts}
+              dir="rtl"
+              className="h-full min-h-full whitespace-pre-wrap bg-transparent p-5 font-naskh text-lg leading-loose text-ink outline-none"
+            />
+          </div>
           <FootnotesPanel counts={footnoteCounts} onInsert={insertFootnote} />
-          <AssistToolbar text={text} onApply={setText} />
+          <AssistToolbar
+            getText={() => editorRef.current?.innerText ?? ""}
+            onApply={replaceAllText}
+          />
         </div>
 
         {printedState === "expanded" && (
