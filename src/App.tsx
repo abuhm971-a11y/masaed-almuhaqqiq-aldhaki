@@ -29,6 +29,20 @@ type FootnoteEntry = {
   includeInPrint: boolean;
 };
 
+const IMAGE_NOTE_CATEGORIES = [
+  { key: "desc", label: "توصيف" },
+  { key: "comment", label: "تعليق" },
+] as const;
+
+type ImageNoteCategoryKey = (typeof IMAGE_NOTE_CATEGORIES)[number]["key"];
+
+type ImageNoteEntry = {
+  id: string;
+  category: ImageNoteCategoryKey;
+  index: number;
+  text: string;
+};
+
 const ASSIST_ACTIONS = [
   { key: "tashkeel", label: "تشكيل" },
   { key: "tasheeh", label: "تصحيح" },
@@ -78,6 +92,26 @@ async function dataUrlToFile(dataUrl: string, filename: string): Promise<File> {
   return new File([blob], filename, { type: blob.type });
 }
 
+/** Rotates an image 90° clockwise using canvas. Returns a PNG data URL. */
+function rotateImage90(imageUrl: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalHeight;
+      canvas.height = img.naturalWidth;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("تعذّر إنشاء لوحة الرسم للتدوير"));
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate(Math.PI / 2);
+      ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    img.onerror = () => reject(new Error("تعذّر تحميل الصورة للتدوير"));
+    img.src = imageUrl;
+  });
+}
+
 /** A side panel (manuscript image or printed image). Collapses to a closed
  * vertical strip and can be hidden entirely. Never affects the center panel's
  * guaranteed minimum width. */
@@ -108,12 +142,23 @@ function SidePanel({
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [description, setDescription] = useState("");
+  const [notes, setNotes] = useState<ImageNoteEntry[]>([]);
   const [splitMode, setSplitMode] = useState(false);
   const [splitX, setSplitX] = useState(50);
   const [crops, setCrops] = useState<{ left: string; right: string } | null>(null);
   const splitContainerRef = useRef<HTMLDivElement>(null);
   const draggingSplit = useRef(false);
+
+  const addNote = (categoryKey: ImageNoteCategoryKey) => {
+    const nextIndex = notes.filter((n) => n.category === categoryKey).length + 1;
+    setNotes((prev) => [
+      ...prev,
+      { id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, category: categoryKey, index: nextIndex, text: "" },
+    ]);
+  };
+  const updateNoteText = (id: string, text: string) => {
+    setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, text } : n)));
+  };
 
   const runTranscription = async (file: File) => {
     setBusy(true);
@@ -194,6 +239,25 @@ function SidePanel({
     await runTranscription(file);
   };
 
+  const rotate = async () => {
+    if (!imageUrl) return;
+    setError(null);
+    try {
+      const rotatedDataUrl = await rotateImage90(imageUrl);
+      const file = await dataUrlToFile(
+        rotatedDataUrl,
+        `${(fileName ?? "page").replace(/\.[^.]+$/, "")}-rot.png`
+      );
+      setImageUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(file);
+      });
+      setFileName(file.name);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "تعذّر تدوير الصورة");
+    }
+  };
+
   if (state === "hidden") return null;
 
   if (state === "collapsed") {
@@ -238,6 +302,40 @@ function SidePanel({
             إخفاء
           </button>
         </div>
+      </div>
+
+      <div className="flex items-center gap-1 border-b border-border bg-paper-dim/50 px-2 py-1">
+        <label
+          className="cursor-pointer rounded-md px-2 py-1 text-xs text-ink-soft hover:bg-white/50"
+          title="استيراد صورة"
+        >
+          استيراد
+          <input
+            type="file"
+            accept=".pdf,.zip,image/*"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) handleFile(f);
+            }}
+          />
+        </label>
+        <button
+          onClick={() => setSplitMode((v) => !v)}
+          disabled={!imageUrl}
+          title="قص الصورة إلى صفحتين"
+          className="rounded-md px-2 py-1 text-xs text-ink-soft hover:bg-white/50 disabled:opacity-40"
+        >
+          قص
+        </button>
+        <button
+          onClick={rotate}
+          disabled={!imageUrl}
+          title="تدوير 90°"
+          className="rounded-md px-2 py-1 text-xs text-ink-soft hover:bg-white/50 disabled:opacity-40"
+        >
+          تدوير
+        </button>
       </div>
 
       <div
@@ -309,28 +407,6 @@ function SidePanel({
             <span className="text-xs">{fileName}</span>
             {busy && <span className="text-xs text-bronze">جارٍ التفريغ النصي…</span>}
             {error && <span className="text-xs text-red-700">{error}</span>}
-
-            {imageUrl && !splitMode && !crops && (
-              <button
-                onClick={() => setSplitMode(true)}
-                className="text-xs text-bronze underline"
-              >
-                قص الصورة إلى صفحتين
-              </button>
-            )}
-
-            <label className="cursor-pointer text-xs text-bronze underline">
-              استيراد صورة أخرى
-              <input
-                type="file"
-                accept=".pdf,.zip,image/*"
-                className="hidden"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) handleFile(f);
-                }}
-              />
-            </label>
           </div>
         ) : (
           <label className="flex h-full min-h-[220px] cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border text-center text-sm text-ink-soft transition-colors hover:border-bronze hover:text-ink">
@@ -349,15 +425,124 @@ function SidePanel({
           </label>
         )}
 
-        <textarea
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          dir="rtl"
-          placeholder="وصف أو تعليق على هذه الصورة…"
-          rows={2}
-          className="mt-2 w-full rounded-md border border-border bg-white/50 p-2 text-xs text-ink outline-none placeholder:text-ink-soft/50"
-        />
+        <div className="mt-2 space-y-2">
+          {IMAGE_NOTE_CATEGORIES.map((cat) => {
+            const catNotes = notes.filter((n) => n.category === cat.key);
+            return (
+              <div key={cat.key} className="rounded-lg border border-border bg-white/70 p-2">
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="text-xs font-bold text-ink">{cat.label}</span>
+                  <button
+                    onClick={() => addNote(cat.key)}
+                    className="rounded-full border border-border bg-white/60 px-2 py-0.5 text-[10px] text-bronze hover:bg-white"
+                  >
+                    ＋ إضافة
+                  </button>
+                </div>
+                {catNotes.length > 0 && (
+                  <div className="divide-y divide-border/50">
+                    {catNotes.map((n) => (
+                      <div key={n.id} className="flex items-start gap-2 py-1.5 first:pt-0 last:pb-0">
+                        <span className="mt-2 shrink-0 text-[11px] font-semibold text-ink-soft">
+                          {n.index}.
+                        </span>
+                        <textarea
+                          dir="rtl"
+                          rows={2}
+                          value={n.text}
+                          onChange={(e) => updateNoteText(n.id, e.target.value)}
+                          placeholder={`اكتب ${cat.label} هنا…`}
+                          className="min-w-0 flex-1 resize-y rounded-md border border-border bg-white/80 p-1.5 text-xs leading-relaxed text-ink outline-none placeholder:text-ink-soft/50"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
+    </div>
+  );
+}
+
+/** Compact formatting toolbar for the main editor. Uses the browser's
+ * built-in execCommand for bold/italic/underline/alignment/lists — a
+ * deliberate choice over hand-rolled Range manipulation, since that's
+ * already caused one real bug in this project (see insertFootnote's
+ * DocumentFragment fix) and execCommand is the well-tested path for
+ * exactly this kind of toggle-formatting on a contentEditable selection.
+ * Shows one row of the 3 most common actions; everything else lives
+ * behind a single "…" dropdown so the toolbar never grows past one row. */
+function FormatToolbar({ editorRef }: { editorRef: React.RefObject<HTMLDivElement> }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  const exec = (command: string, value?: string) => {
+    editorRef.current?.focus();
+    document.execCommand(command, false, value);
+  };
+
+  const MAIN_BUTTONS = [
+    { command: "bold", label: "B", title: "عريض", cls: "font-bold" },
+    { command: "italic", label: "I", title: "مائل", cls: "italic" },
+    { command: "underline", label: "U", title: "تسطير", cls: "underline" },
+  ];
+
+  const MORE_ACTIONS = [
+    { command: "justifyRight", label: "محاذاة يمين" },
+    { command: "justifyCenter", label: "محاذاة وسط" },
+    { command: "justifyLeft", label: "محاذاة يسار" },
+    { command: "justifyFull", label: "ضبط" },
+    { command: "insertUnorderedList", label: "قائمة نقطية" },
+    { command: "insertOrderedList", label: "قائمة مرقّمة" },
+    { command: "formatBlock", value: "h2", label: "عنوان" },
+    { command: "formatBlock", value: "p", label: "نص عادي" },
+    { command: "removeFormat", label: "إزالة التنسيق" },
+  ];
+
+  return (
+    <div className="relative flex items-center gap-1 border-b border-border bg-paper-dim/40 px-3 py-1.5">
+      {MAIN_BUTTONS.map((b) => (
+        <button
+          key={b.command}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => exec(b.command)}
+          title={b.title}
+          className={`w-7 rounded-md py-0.5 text-sm text-ink hover:bg-white/60 ${b.cls}`}
+        >
+          {b.label}
+        </button>
+      ))}
+
+      <div className="mx-1 h-4 w-px bg-border" />
+
+      <button
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setMenuOpen((v) => !v)}
+        title="مزيد من إجراءات التنسيق"
+        className="rounded-md px-2 py-0.5 text-sm text-ink-soft hover:bg-white/60"
+      >
+        …
+      </button>
+
+      {menuOpen && (
+        <div className="absolute right-0 top-full z-20 mt-1 w-40 rounded-md border border-border bg-white shadow-lg">
+          {MORE_ACTIONS.map((a, i) => (
+            <button
+              key={i}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                exec(a.command, a.value);
+                setMenuOpen(false);
+              }}
+              className="block w-full px-3 py-1.5 text-right text-xs text-ink hover:bg-paper-dim"
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -895,6 +1080,7 @@ export default function App() {
               الكلمات: {counts.words} — الحروف: {counts.chars}
             </span>
           </div>
+          <FormatToolbar editorRef={editorRef} />
           <SpecialCharsToolbar onInsert={insertAtCursor} />
           <div className="relative flex-1 overflow-auto">
             {isEmpty && (
