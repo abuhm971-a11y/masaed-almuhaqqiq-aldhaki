@@ -757,6 +757,67 @@ export default function App() {
     recomputeCounts();
   }, [recomputeCounts]);
 
+  const [showPrintPreview, setShowPrintPreview] = useState(false);
+  const [printBodyText, setPrintBodyText] = useState("");
+  const [printFootnoteList, setPrintFootnoteList] = useState<
+    { number: number; category: string; text: string }[]
+  >([]);
+
+  /** Builds the print view: footnotes excluded via their checkbox are
+   * removed from the text entirely. If the included footnotes span more
+   * than one category, they're renumbered sequentially (1, 2, 3…) in the
+   * order they appear in the text, merging all categories together. If
+   * only one category is included, its own per-category numbering is kept
+   * as-is. */
+  const buildPrintPreview = useCallback(() => {
+    const el = editorRef.current;
+    if (!el) return;
+
+    const clone = el.cloneNode(true) as HTMLElement;
+    const markerEls = Array.from(
+      clone.querySelectorAll<HTMLElement>("sup[data-footnote-id]")
+    );
+    const orderedIds = markerEls.map((m) => m.dataset.footnoteId!);
+
+    const includedEntries = footnotes.filter((f) => f.includeInPrint);
+    const includedIds = new Set(includedEntries.map((f) => f.id));
+    const unify = new Set(includedEntries.map((f) => f.category)).size > 1;
+
+    let counter = 0;
+    const numberById = new Map<string, number>();
+    for (const id of orderedIds) {
+      if (!includedIds.has(id)) continue;
+      counter += 1;
+      numberById.set(id, counter);
+    }
+
+    markerEls.forEach((m) => {
+      const id = m.dataset.footnoteId!;
+      if (!includedIds.has(id)) {
+        m.remove();
+        return;
+      }
+      const entry = footnotes.find((f) => f.id === id)!;
+      m.textContent = String(unify ? numberById.get(id) : entry.index);
+    });
+
+    setPrintBodyText(clone.innerText);
+    setPrintFootnoteList(
+      orderedIds
+        .filter((id) => includedIds.has(id))
+        .map((id) => {
+          const entry = footnotes.find((f) => f.id === id)!;
+          const label = FOOTNOTE_CATEGORIES.find((c) => c.key === entry.category)!.label;
+          return {
+            number: unify ? numberById.get(id)! : entry.index,
+            category: label,
+            text: entry.text,
+          };
+        })
+    );
+    setShowPrintPreview(true);
+  }, [footnotes]);
+
   return (
     <div className="flex h-screen flex-col bg-paper font-ui">
       {/* Header */}
@@ -776,6 +837,13 @@ export default function App() {
               <option value="printed">مرتبط بصورة المطبوعة</option>
             </select>
           </label>
+
+          <button
+            onClick={buildPrintPreview}
+            className="rounded-md border border-border px-3 py-1 text-sm text-ink-soft hover:bg-paper-dim"
+          >
+            معاينة الطباعة
+          </button>
 
           {manuscriptState === "hidden" && (
             <button
@@ -874,6 +942,42 @@ export default function App() {
           onTextRecognized={appendRecognizedText}
         />
       </main>
+
+      {showPrintPreview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div
+            dir="rtl"
+            className="max-h-[90vh] w-full max-w-2xl overflow-auto rounded-xl bg-paper p-6 shadow-xl"
+          >
+            <div className="mb-4 flex items-center justify-between border-b border-border pb-3">
+              <h2 className="font-naskh text-lg font-bold text-ink">معاينة الطباعة</h2>
+              <button
+                onClick={() => setShowPrintPreview(false)}
+                className="rounded-md border border-border px-3 py-1 text-sm text-ink-soft hover:bg-paper-dim"
+              >
+                إغلاق
+              </button>
+            </div>
+
+            <p className="whitespace-pre-wrap font-naskh text-lg leading-loose text-ink">
+              {printBodyText || "لا يوجد نص بعد"}
+            </p>
+
+            {printFootnoteList.length > 0 && (
+              <div className="mt-6 border-t border-border pt-4">
+                <h3 className="mb-2 text-sm font-bold text-ink">الحواشي</h3>
+                <ol className="space-y-1 text-sm text-ink">
+                  {printFootnoteList.map((f, i) => (
+                    <li key={i}>
+                      ({f.number}) [{f.category}] {f.text || "—"}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
