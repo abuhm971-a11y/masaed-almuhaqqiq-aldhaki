@@ -381,12 +381,10 @@ function SpecialCharsToolbar({ onInsert }: { onInsert: (ch: string) => void }) {
 }
 
 /** The four fixed footnote categories, with insert buttons and an editable
- * list of every footnote entered so far, grouped under one heading per
- * category so repeated inserts of the same type stack together (1, 2, 3…)
- * instead of appearing as separate unrelated boxes. Each entry has a
- * checkbox that controls whether it's included ("مُثبَتة") when the
- * document is printed — unchecking it never deletes the marker from the
- * text, only excludes it from print output. */
+ * list of every footnote entered so far. Each entry has a checkbox that
+ * controls whether it's included ("مُثبَتة") when the document is printed —
+ * unchecking it never deletes the marker from the text, only excludes it
+ * from print output. */
 function FootnotesPanel({
   entries,
   onInsert,
@@ -425,33 +423,21 @@ function FootnotesPanel({
       {entries.length > 0 && (
         <div className="max-h-72 overflow-auto border-t border-border/60 px-3 py-2">
           {FOOTNOTE_CATEGORIES.filter((cat) => countFor(cat.key) > 0).map((cat) => (
-            <div key={cat.key} className="mb-3 last:mb-0">
-              <div className="mb-1 text-xs font-bold text-ink">{cat.label}</div>
-              <div className="space-y-2">
+            <div key={cat.key} className="mb-3 last:mb-0 rounded-lg border border-border bg-white/70 p-2">
+              <div className="mb-2 text-xs font-bold text-ink">{cat.label}</div>
+              <div className="divide-y divide-border/50">
                 {entries
                   .filter((e) => e.category === cat.key)
                   .map((entry) => (
                     <div
                       key={entry.id}
-                      className={`rounded-lg border border-border bg-white/70 p-2 ${
+                      className={`flex items-start gap-2 py-2 first:pt-0 last:pb-0 ${
                         entry.includeInPrint ? "" : "opacity-50"
                       }`}
                     >
-                      <div className="mb-1 flex items-center justify-between">
-                        <span className="text-xs font-semibold text-ink-soft">
-                          #{entry.index}
-                        </span>
-                        <label className="flex items-center gap-1 text-[11px] text-ink-soft">
-                          <span>إثبات في الطباعة</span>
-                          <input
-                            type="checkbox"
-                            checked={entry.includeInPrint}
-                            onChange={() => onToggleInclude(entry.id)}
-                            title="إثبات هذه الحاشية عند الطباعة"
-                            className="h-3.5 w-3.5 accent-bronze"
-                          />
-                        </label>
-                      </div>
+                      <span className="mt-2 shrink-0 text-xs font-semibold text-ink-soft">
+                        {entry.index}.
+                      </span>
                       <textarea
                         id={`footnote-input-${entry.id}`}
                         dir="rtl"
@@ -459,8 +445,20 @@ function FootnotesPanel({
                         value={entry.text}
                         onChange={(e) => onChangeText(entry.id, e.target.value)}
                         placeholder="اكتب نص الحاشية هنا…"
-                        className="w-full resize-y rounded-md border border-border bg-white/80 p-2 font-naskh text-base leading-relaxed text-ink outline-none placeholder:text-ink-soft/50"
+                        className="min-w-0 flex-1 resize-y rounded-md border border-border bg-white/80 p-2 font-naskh text-base leading-relaxed text-ink outline-none placeholder:text-ink-soft/50"
                       />
+                      <label
+                        className="mt-1 flex shrink-0 flex-col items-center gap-0.5 text-[10px] text-ink-soft"
+                        title="إثبات هذه الحاشية عند الطباعة"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={entry.includeInPrint}
+                          onChange={() => onToggleInclude(entry.id)}
+                          className="h-3.5 w-3.5 accent-bronze"
+                        />
+                        <span>إثبات</span>
+                      </label>
                     </div>
                   ))}
               </div>
@@ -969,7 +967,7 @@ export default function App() {
                 <ol className="space-y-1 text-sm text-ink">
                   {printFootnoteList.map((f, i) => (
                     <li key={i}>
-                      ({f.number}) [{f.category}] {f.text || "—"}
+                      ({f.number}) {f.text || "—"}
                     </li>
                   ))}
                 </ol>
