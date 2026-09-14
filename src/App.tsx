@@ -1,4 +1,22 @@
 import { useCallback, useRef, useState } from "react";
+import {
+  Bold,
+  Italic,
+  Underline,
+  AlignRight,
+  AlignCenter,
+  AlignLeft,
+  AlignJustify,
+  List,
+  ListOrdered,
+  Heading2,
+  Pilcrow,
+  Eraser,
+  MoreHorizontal,
+  Upload,
+  Scissors,
+  RotateCw,
+} from "lucide-react";
 import { transcribeImage, assistText } from "./lib/supabaseClient";
 
 type SyncMode = "independent" | "manuscript" | "printed";
@@ -304,12 +322,12 @@ function SidePanel({
         </div>
       </div>
 
-      <div className="flex items-center gap-1 border-b border-border bg-paper-dim/50 px-2 py-1">
+      <div className="flex items-center gap-0.5 border-b border-border bg-paper-dim/50 px-2 py-1">
         <label
-          className="cursor-pointer rounded-md px-2 py-1 text-xs text-ink-soft hover:bg-white/50"
+          className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-ink-soft hover:bg-white/60"
           title="استيراد صورة"
         >
-          استيراد
+          <Upload size={15} />
           <input
             type="file"
             accept=".pdf,.zip,image/*"
@@ -324,17 +342,17 @@ function SidePanel({
           onClick={() => setSplitMode((v) => !v)}
           disabled={!imageUrl}
           title="قص الصورة إلى صفحتين"
-          className="rounded-md px-2 py-1 text-xs text-ink-soft hover:bg-white/50 disabled:opacity-40"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-white/60 disabled:opacity-30"
         >
-          قص
+          <Scissors size={15} />
         </button>
         <button
           onClick={rotate}
           disabled={!imageUrl}
           title="تدوير 90°"
-          className="rounded-md px-2 py-1 text-xs text-ink-soft hover:bg-white/50 disabled:opacity-40"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-white/60 disabled:opacity-30"
         >
-          تدوير
+          <RotateCw size={15} />
         </button>
       </div>
 
@@ -484,50 +502,50 @@ function FormatToolbar({ editorRef }: { editorRef: React.RefObject<HTMLDivElemen
   };
 
   const MAIN_BUTTONS = [
-    { command: "bold", label: "B", title: "عريض", cls: "font-bold" },
-    { command: "italic", label: "I", title: "مائل", cls: "italic" },
-    { command: "underline", label: "U", title: "تسطير", cls: "underline" },
+    { command: "bold", title: "عريض", Icon: Bold },
+    { command: "italic", title: "مائل", Icon: Italic },
+    { command: "underline", title: "تسطير", Icon: Underline },
   ];
 
   const MORE_ACTIONS = [
-    { command: "justifyRight", label: "محاذاة يمين" },
-    { command: "justifyCenter", label: "محاذاة وسط" },
-    { command: "justifyLeft", label: "محاذاة يسار" },
-    { command: "justifyFull", label: "ضبط" },
-    { command: "insertUnorderedList", label: "قائمة نقطية" },
-    { command: "insertOrderedList", label: "قائمة مرقّمة" },
-    { command: "formatBlock", value: "h2", label: "عنوان" },
-    { command: "formatBlock", value: "p", label: "نص عادي" },
-    { command: "removeFormat", label: "إزالة التنسيق" },
+    { command: "justifyRight", label: "محاذاة يمين", Icon: AlignRight },
+    { command: "justifyCenter", label: "محاذاة وسط", Icon: AlignCenter },
+    { command: "justifyLeft", label: "محاذاة يسار", Icon: AlignLeft },
+    { command: "justifyFull", label: "ضبط", Icon: AlignJustify },
+    { command: "insertUnorderedList", label: "قائمة نقطية", Icon: List },
+    { command: "insertOrderedList", label: "قائمة مرقّمة", Icon: ListOrdered },
+    { command: "formatBlock", value: "h2", label: "عنوان", Icon: Heading2 },
+    { command: "formatBlock", value: "p", label: "نص عادي", Icon: Pilcrow },
+    { command: "removeFormat", label: "إزالة التنسيق", Icon: Eraser },
   ];
 
   return (
-    <div className="relative flex items-center gap-1 border-b border-border bg-paper-dim/40 px-3 py-1.5">
-      {MAIN_BUTTONS.map((b) => (
-        <button
-          key={b.command}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => exec(b.command)}
-          title={b.title}
-          className={`w-7 rounded-md py-0.5 text-sm text-ink hover:bg-white/60 ${b.cls}`}
-        >
-          {b.label}
-        </button>
-      ))}
-
-      <div className="mx-1 h-4 w-px bg-border" />
+    <div className="relative flex items-center gap-0.5 border-b border-border bg-paper-dim/40 px-2 py-1">
+      <div className="flex items-center overflow-hidden rounded-md border border-border/70">
+        {MAIN_BUTTONS.map((b) => (
+          <button
+            key={b.command}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => exec(b.command)}
+            title={b.title}
+            className="flex h-7 w-7 items-center justify-center text-ink-soft hover:bg-white/60"
+          >
+            <b.Icon size={14} />
+          </button>
+        ))}
+      </div>
 
       <button
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => setMenuOpen((v) => !v)}
         title="مزيد من إجراءات التنسيق"
-        className="rounded-md px-2 py-0.5 text-sm text-ink-soft hover:bg-white/60"
+        className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-white/60"
       >
-        …
+        <MoreHorizontal size={15} />
       </button>
 
       {menuOpen && (
-        <div className="absolute right-0 top-full z-20 mt-1 w-40 rounded-md border border-border bg-white shadow-lg">
+        <div className="absolute right-0 top-full z-20 mt-1 w-44 rounded-md border border-border bg-white py-1 shadow-lg">
           {MORE_ACTIONS.map((a, i) => (
             <button
               key={i}
@@ -536,8 +554,9 @@ function FormatToolbar({ editorRef }: { editorRef: React.RefObject<HTMLDivElemen
                 exec(a.command, a.value);
                 setMenuOpen(false);
               }}
-              className="block w-full px-3 py-1.5 text-right text-xs text-ink hover:bg-paper-dim"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-right text-xs text-ink hover:bg-paper-dim"
             >
+              <a.Icon size={13} className="text-ink-soft" />
               {a.label}
             </button>
           ))}
