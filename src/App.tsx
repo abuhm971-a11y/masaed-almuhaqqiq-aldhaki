@@ -1,4 +1,9 @@
 import { useCallback, useRef, useState } from "react";
+import { useEditor, EditorContent, type Editor } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import UnderlineExt from "@tiptap/extension-underline";
+import TextAlign from "@tiptap/extension-text-align";
+import { FootnoteMark } from "./lib/footnoteExtension";
 import {
   Bold,
   Italic,
@@ -485,38 +490,32 @@ function SidePanel({
   );
 }
 
-/** Compact formatting toolbar for the main editor. Uses the browser's
- * built-in execCommand for bold/italic/underline/alignment/lists — a
- * deliberate choice over hand-rolled Range manipulation, since that's
- * already caused one real bug in this project (see insertFootnote's
- * DocumentFragment fix) and execCommand is the well-tested path for
- * exactly this kind of toggle-formatting on a contentEditable selection.
- * Shows one row of the 3 most common actions; everything else lives
- * behind a single "…" dropdown so the toolbar never grows past one row. */
-function FormatToolbar({ editorRef }: { editorRef: React.RefObject<HTMLDivElement> }) {
+/** Compact formatting toolbar for the main editor. Calls real TipTap
+ * (ProseMirror) commands directly on the editor instance — the document
+ * model itself enforces correct behavior, so there's no hand-rolled
+ * Range/execCommand logic left to get wrong. Shows one row of the 3 most
+ * common actions; everything else lives behind a single "…" dropdown so
+ * the toolbar never grows past one row. */
+function FormatToolbar({ editor }: { editor: Editor | null }) {
   const [menuOpen, setMenuOpen] = useState(false);
-
-  const exec = (command: string, value?: string) => {
-    editorRef.current?.focus();
-    document.execCommand(command, false, value);
-  };
+  if (!editor) return null;
 
   const MAIN_BUTTONS = [
-    { command: "bold", title: "عريض", Icon: Bold },
-    { command: "italic", title: "مائل", Icon: Italic },
-    { command: "underline", title: "تسطير", Icon: Underline },
+    { title: "عريض", Icon: Bold, run: () => editor.chain().focus().toggleBold().run() },
+    { title: "مائل", Icon: Italic, run: () => editor.chain().focus().toggleItalic().run() },
+    { title: "تسطير", Icon: Underline, run: () => editor.chain().focus().toggleUnderline().run() },
   ];
 
   const MORE_ACTIONS = [
-    { command: "justifyRight", label: "محاذاة يمين", Icon: AlignRight },
-    { command: "justifyCenter", label: "محاذاة وسط", Icon: AlignCenter },
-    { command: "justifyLeft", label: "محاذاة يسار", Icon: AlignLeft },
-    { command: "justifyFull", label: "ضبط", Icon: AlignJustify },
-    { command: "insertUnorderedList", label: "قائمة نقطية", Icon: List },
-    { command: "insertOrderedList", label: "قائمة مرقّمة", Icon: ListOrdered },
-    { command: "formatBlock", value: "h2", label: "عنوان", Icon: Heading2 },
-    { command: "formatBlock", value: "p", label: "نص عادي", Icon: Pilcrow },
-    { command: "removeFormat", label: "إزالة التنسيق", Icon: Eraser },
+    { label: "محاذاة يمين", Icon: AlignRight, run: () => editor.chain().focus().setTextAlign("right").run() },
+    { label: "محاذاة وسط", Icon: AlignCenter, run: () => editor.chain().focus().setTextAlign("center").run() },
+    { label: "محاذاة يسار", Icon: AlignLeft, run: () => editor.chain().focus().setTextAlign("left").run() },
+    { label: "ضبط", Icon: AlignJustify, run: () => editor.chain().focus().setTextAlign("justify").run() },
+    { label: "قائمة نقطية", Icon: List, run: () => editor.chain().focus().toggleBulletList().run() },
+    { label: "قائمة مرقّمة", Icon: ListOrdered, run: () => editor.chain().focus().toggleOrderedList().run() },
+    { label: "عنوان", Icon: Heading2, run: () => editor.chain().focus().toggleHeading({ level: 2 }).run() },
+    { label: "نص عادي", Icon: Pilcrow, run: () => editor.chain().focus().setParagraph().run() },
+    { label: "إزالة التنسيق", Icon: Eraser, run: () => editor.chain().focus().unsetAllMarks().clearNodes().run() },
   ];
 
   return (
@@ -524,9 +523,9 @@ function FormatToolbar({ editorRef }: { editorRef: React.RefObject<HTMLDivElemen
       <div className="flex items-center overflow-hidden rounded-md border border-border/70">
         {MAIN_BUTTONS.map((b) => (
           <button
-            key={b.command}
+            key={b.title}
             onMouseDown={(e) => e.preventDefault()}
-            onClick={() => exec(b.command)}
+            onClick={b.run}
             title={b.title}
             className="flex h-7 w-7 items-center justify-center text-ink-soft hover:bg-white/60"
           >
@@ -551,7 +550,7 @@ function FormatToolbar({ editorRef }: { editorRef: React.RefObject<HTMLDivElemen
               key={i}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => {
-                exec(a.command, a.value);
+                a.run();
                 setMenuOpen(false);
               }}
               className="flex w-full items-center gap-2 px-3 py-1.5 text-right text-xs text-ink hover:bg-paper-dim"
@@ -800,9 +799,24 @@ export default function App() {
 
   const manuscriptScrollRef = useRef<HTMLDivElement>(null);
   const printedScrollRef = useRef<HTMLDivElement>(null);
-  const editorRef = useRef<HTMLDivElement>(null);
-  const [isEmpty, setIsEmpty] = useState(true);
-  const [counts, setCounts] = useState({ words: 0, chars: 0 });
+  const editorWrapperRef = useRef<HTMLDivElement>(null);
+
+  const editor = useEditor({
+    extensions: [
+      StarterKit.configure({ heading: { levels: [2] } }),
+      UnderlineExt,
+      TextAlign.configure({ types: ["paragraph", "heading"] }),
+      FootnoteMark,
+    ],
+    content: "",
+    editorProps: {
+      attributes: {
+        dir: "rtl",
+        class:
+          "h-full min-h-full whitespace-pre-wrap bg-transparent p-5 font-naskh text-lg leading-loose text-ink outline-none",
+      },
+    },
+  });
 
   const clamp = (v: number, min: number, max: number) =>
     Math.min(max, Math.max(min, v));
@@ -817,118 +831,42 @@ export default function App() {
     setPrintedWidth((w) => clamp(w + deltaX, MIN_SIDE_WIDTH, MAX_SIDE_WIDTH));
   }, []);
 
-  const recomputeCounts = useCallback(() => {
-    const el = editorRef.current;
-    if (!el) return;
-    const plain = el.innerText.replace(/\u00a0/g, " ");
-    setIsEmpty(el.innerText.trim().length === 0);
-    setCounts({
-      chars: plain.length,
-      words: plain.trim() ? plain.trim().split(/\s+/).length : 0,
-    });
-  }, []);
-
   const syncFromPanel = (source: "manuscript" | "printed") => {
     if (syncMode !== source) return;
     const src =
       source === "manuscript" ? manuscriptScrollRef.current : printedScrollRef.current;
-    const dst = editorRef.current;
+    const dst = editorWrapperRef.current;
     if (!src || !dst) return;
     const ratio = src.scrollTop / Math.max(1, src.scrollHeight - src.clientHeight);
     dst.scrollTop = ratio * Math.max(1, dst.scrollHeight - dst.clientHeight);
   };
 
-  /** Places the caret at the very end of the editor. Used when there is no
-   * live text selection to insert at (e.g. after importing an image). */
-  const placeCaretAtEnd = (el: HTMLElement) => {
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    range.collapse(false);
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-  };
-
-  /** Inserts a plain-text node at the current caret position inside the
-   * editor (falls back to the end if the editor isn't focused/selected). */
+  /** Inserts plain text (special characters) at the current cursor
+   * position via TipTap's own command — the document model handles caret
+   * placement correctly on its own, no manual Range code needed. */
   const insertAtCursor = useCallback((insertText: string) => {
-    const el = editorRef.current;
-    if (!el) return;
+    editor?.chain().focus().insertContent(insertText).run();
+  }, [editor]);
 
-    const sel = window.getSelection();
-    const selectionInsideEditor =
-      sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).commonAncestorContainer);
-    if (!selectionInsideEditor) {
-      el.focus();
-      placeCaretAtEnd(el);
-    }
-
-    const range = window.getSelection()!.getRangeAt(0);
-    range.deleteContents();
-    const node = document.createTextNode(insertText);
-    range.insertNode(node);
-    range.setStartAfter(node);
-    range.setEndAfter(node);
-    window.getSelection()!.removeAllRanges();
-    window.getSelection()!.addRange(range);
-
-    recomputeCounts();
-  }, [recomputeCounts]);
-
-  /** Inserts a non-editable superscript footnote marker token at the
-   * caret, followed by a zero-width space so typing can continue after it. */
+  /** Inserts an atomic footnoteMarker node at the caret. Being a real
+   * ProseMirror node (not a DOM element spliced in via Range hacks), it
+   * moves correctly with surrounding text through normal edits. */
   const insertFootnote = useCallback((categoryKey: FootnoteCategoryKey) => {
-    const el = editorRef.current;
-    if (!el) return;
-
+    if (!editor) return;
     const nextIndex = footnotes.filter((f) => f.category === categoryKey).length + 1;
-    const label = FOOTNOTE_CATEGORIES.find((c) => c.key === categoryKey)!.label;
     const id = `fn-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
-    const sel = window.getSelection();
-    const selectionInsideEditor =
-      sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).commonAncestorContainer);
-    if (!selectionInsideEditor) {
-      el.focus();
-      placeCaretAtEnd(el);
-    }
+    editor
+      .chain()
+      .focus()
+      .insertContent({ type: "footnoteMarker", attrs: { footnoteId: id, number: nextIndex } })
+      .run();
 
-    const marker = document.createElement("sup");
-    marker.contentEditable = "false";
-    marker.dataset.footnoteId = id;
-    marker.title = `${label} #${nextIndex} — انقر لتحرير نصها`;
-    marker.className =
-      "mx-0.5 cursor-pointer rounded bg-bronze-light/60 px-1 text-[11px] font-ui text-ink hover:bg-bronze-light";
-    marker.textContent = String(nextIndex);
-    marker.addEventListener("click", () => {
-      const input = document.getElementById(`footnote-input-${id}`) as HTMLTextAreaElement | null;
-      input?.scrollIntoView({ block: "nearest" });
-      input?.focus();
-    });
-
-    const spacer = document.createTextNode("\u200b");
-
-    const range = window.getSelection()!.getRangeAt(0);
-    range.deleteContents();
-    // Insert both nodes atomically, in order, so a second insertNode call
-    // can't re-collapse the range and reverse their order.
-    const frag = document.createDocumentFragment();
-    frag.appendChild(marker);
-    frag.appendChild(spacer);
-    range.insertNode(frag);
-    // Position the caret using the actual spacer node reference — safe
-    // regardless of how the range's own boundary was left after insertNode.
-    range.setStartAfter(spacer);
-    range.setEndAfter(spacer);
-    window.getSelection()!.removeAllRanges();
-    window.getSelection()!.addRange(range);
-
-    recomputeCounts();
     setFootnotes((prev) => [
       ...prev,
       { id, category: categoryKey, index: nextIndex, text: "", includeInPrint: true },
     ]);
-  }, [footnotes, recomputeCounts]);
+  }, [editor, footnotes]);
 
   const updateFootnoteText = useCallback((id: string, text: string) => {
     setFootnotes((prev) => prev.map((f) => (f.id === id ? { ...f, text } : f)));
@@ -940,24 +878,27 @@ export default function App() {
     );
   }, []);
 
+  /** Appends OCR text from a newly added manuscript/printed copy at the
+   * end of the document, separated by a couple of line breaks if the
+   * document already has content. */
   const appendRecognizedText = useCallback((recognized: string) => {
-    if (!recognized.trim()) return;
-    const el = editorRef.current;
-    if (!el) return;
-    el.focus();
-    placeCaretAtEnd(el);
-    if (el.innerText.trim()) insertAtCursor("\n\n");
-    insertAtCursor(recognized);
-  }, [insertAtCursor]);
+    if (!recognized.trim() || !editor) return;
+    const chain = editor.chain().focus("end");
+    if (!editor.isEmpty) chain.setHardBreak().setHardBreak();
+    chain.insertContent(recognized).run();
+  }, [editor]);
 
-  /** Full-text AI actions replace the whole editable body with plain text
-   * (footnote markers are not preserved through this operation yet). */
+  /** Full-text AI actions replace the whole document with plain
+   * paragraphs (footnote marker nodes are not preserved through this
+   * operation yet — the AI only ever sees/returns plain text). */
   const replaceAllText = useCallback((newText: string) => {
-    const el = editorRef.current;
-    if (!el) return;
-    el.innerText = newText;
-    recomputeCounts();
-  }, [recomputeCounts]);
+    if (!editor) return;
+    const paragraphs = newText
+      .split(/\n+/)
+      .filter((line) => line.length > 0)
+      .map((line) => ({ type: "paragraph", content: [{ type: "text", text: line }] }));
+    editor.commands.setContent(paragraphs.length ? paragraphs : "<p></p>");
+  }, [editor]);
 
   const [showPrintPreview, setShowPrintPreview] = useState(false);
   const [printBodyText, setPrintBodyText] = useState("");
@@ -972,8 +913,8 @@ export default function App() {
    * only one category is included, its own per-category numbering is kept
    * as-is. */
   const buildPrintPreview = useCallback(() => {
-    const el = editorRef.current;
-    if (!el) return;
+    if (!editor) return;
+    const el = editor.view.dom as HTMLElement;
 
     const clone = el.cloneNode(true) as HTMLElement;
     const markerEls = Array.from(
@@ -1018,7 +959,7 @@ export default function App() {
         })
     );
     setShowPrintPreview(true);
-  }, [footnotes]);
+  }, [footnotes, editor]);
 
   return (
     <div className="flex h-screen flex-col bg-paper font-ui">
@@ -1096,25 +1037,29 @@ export default function App() {
               نص التحقيق
             </span>
             <span className="text-xs text-ink-soft">
-              الكلمات: {counts.words} — الحروف: {counts.chars}
+              الكلمات: {editor && editor.getText().trim() ? editor.getText().trim().split(/\s+/).length : 0} — الحروف: {editor?.getText().length ?? 0}
             </span>
           </div>
-          <FormatToolbar editorRef={editorRef} />
+          <FormatToolbar editor={editor} />
           <SpecialCharsToolbar onInsert={insertAtCursor} />
-          <div className="relative flex-1 overflow-auto">
-            {isEmpty && (
+          <div
+            ref={editorWrapperRef}
+            className="relative flex-1 overflow-auto"
+            onClick={(e) => {
+              const marker = (e.target as HTMLElement).closest("sup[data-footnote-id]");
+              const id = marker?.getAttribute("data-footnote-id");
+              if (!id) return;
+              const input = document.getElementById(`footnote-input-${id}`) as HTMLTextAreaElement | null;
+              input?.scrollIntoView({ block: "nearest" });
+              input?.focus();
+            }}
+          >
+            {editor?.isEmpty && (
               <span className="pointer-events-none absolute right-5 top-5 font-naskh text-lg text-ink-soft/60">
                 ابدأ كتابة نص التحقيق هنا…
               </span>
             )}
-            <div
-              ref={editorRef}
-              contentEditable
-              suppressContentEditableWarning
-              onInput={recomputeCounts}
-              dir="rtl"
-              className="h-full min-h-full whitespace-pre-wrap bg-transparent p-5 font-naskh text-lg leading-loose text-ink outline-none"
-            />
+            <EditorContent editor={editor} />
           </div>
           <FootnotesPanel
             entries={footnotes}
@@ -1123,7 +1068,7 @@ export default function App() {
             onToggleInclude={toggleFootnoteInclude}
           />
           <AssistToolbar
-            getText={() => editorRef.current?.innerText ?? ""}
+            getText={() => editor?.getText() ?? ""}
             onApply={replaceAllText}
           />
         </div>
