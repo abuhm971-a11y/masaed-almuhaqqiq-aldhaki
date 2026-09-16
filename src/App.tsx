@@ -135,9 +135,46 @@ function rotateImage90(imageUrl: string): Promise<string> {
   });
 }
 
+/** One manuscript/printed copy within a side panel: its own image, OCR
+ * status, split-tool state, and description/comment notes. Multiple
+ * copies live inside the SAME panel as tabs — this is not multiple
+ * panels, per the corrected design (comparison across copies is logical,
+ * via tagged variant footnotes, not a side-by-side visual layout). */
+type Copy = {
+  id: string;
+  label: string;
+  fileName: string | null;
+  imageUrl: string | null;
+  busy: boolean;
+  error: string | null;
+  notes: ImageNoteEntry[];
+  splitMode: boolean;
+  splitX: number;
+  crops: { left: string; right: string } | null;
+};
+
+const COPY_LABELS = ["أ", "ب", "ج", "د", "هـ", "و", "ز", "ح", "ط", "ي"];
+
+function makeEmptyCopy(label: string): Copy {
+  return {
+    id: `copy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    label,
+    fileName: null,
+    imageUrl: null,
+    busy: false,
+    error: null,
+    notes: [],
+    splitMode: false,
+    splitX: 50,
+    crops: null,
+  };
+}
+
 /** A side panel (manuscript image or printed image). Collapses to a closed
  * vertical strip and can be hidden entirely. Never affects the center panel's
- * guaranteed minimum width. */
+ * guaranteed minimum width. Holds one or more named copies (أ، ب، ج…) as
+ * tabs within itself — every copy is OCR'd automatically via the AI
+ * `transcribe` function as soon as it's added. */
 function SidePanel({
   side,
   title,
@@ -161,62 +198,73 @@ function SidePanel({
   onScroll: () => void;
   onTextRecognized: (text: string) => void;
 }) {
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notes, setNotes] = useState<ImageNoteEntry[]>([]);
-  const [splitMode, setSplitMode] = useState(false);
-  const [splitX, setSplitX] = useState(50);
-  const [crops, setCrops] = useState<{ left: string; right: string } | null>(null);
+  const [copies, setCopies] = useState<Copy[]>([
+    { id: "copy-1", label: COPY_LABELS[0], fileName: null, imageUrl: null, busy: false, error: null, notes: [], splitMode: false, splitX: 50, crops: null },
+  ]);
+  const [activeCopyId, setActiveCopyId] = useState("copy-1");
+  const active = copies.find((c) => c.id === activeCopyId) ?? copies[0];
+
   const splitContainerRef = useRef<HTMLDivElement>(null);
   const draggingSplit = useRef(false);
 
-  const addNote = (categoryKey: ImageNoteCategoryKey) => {
-    const nextIndex = notes.filter((n) => n.category === categoryKey).length + 1;
-    setNotes((prev) => [
-      ...prev,
-      { id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, category: categoryKey, index: nextIndex, text: "" },
-    ]);
-  };
-  const updateNoteText = (id: string, text: string) => {
-    setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, text } : n)));
+  const updateCopy = (id: string, patch: Partial<Copy>) => {
+    setCopies((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
   };
 
-  const runTranscription = async (file: File) => {
-    setBusy(true);
-    setError(null);
+  const addCopy = () => {
+    const nextLabel = COPY_LABELS[copies.length] ?? `نسخة ${copies.length + 1}`;
+    const newCopy = makeEmptyCopy(nextLabel);
+    setCopies((prev) => [...prev, newCopy]);
+    setActiveCopyId(newCopy.id);
+  };
+
+  const addNote = (categoryKey: ImageNoteCategoryKey) => {
+    const nextIndex = active.notes.filter((n) => n.category === categoryKey).length + 1;
+    const newNote: ImageNoteEntry = {
+      id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      category: categoryKey,
+      index: nextIndex,
+      text: "",
+    };
+    updateCopy(active.id, { notes: [...active.notes, newNote] });
+  };
+  const updateNoteText = (noteId: string, text: string) => {
+    updateCopy(active.id, {
+      notes: active.notes.map((n) => (n.id === noteId ? { ...n, text } : n)),
+    });
+  };
+
+  const runTranscription = async (id: string, file: File) => {
+    updateCopy(id, { busy: true, error: null });
     try {
       const recognized = await transcribeImage(file);
       onTextRecognized(recognized);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "تعذّر تفريغ النص من الصورة");
+      updateCopy(id, {
+        error: err instanceof Error ? err.message : "تعذّر تفريغ النص من الصورة",
+      });
     } finally {
-      setBusy(false);
+      updateCopy(id, { busy: false });
     }
   };
 
   const handleFile = async (file: File) => {
-    setFileName(file.name);
-    setError(null);
-    setCrops(null);
-    setSplitMode(false);
+    const id = active.id;
+    if (active.imageUrl) URL.revokeObjectURL(active.imageUrl);
+    updateCopy(id, { fileName: file.name, error: null, crops: null, splitMode: false });
 
     if (!file.type.startsWith("image/")) {
-      setImageUrl(null);
+      updateCopy(id, { imageUrl: null });
       // PDF/ZIP splitting into pages isn't built yet — see README.
       return;
     }
 
-    setImageUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return URL.createObjectURL(file);
-    });
-
-    await runTranscription(file);
+    updateCopy(id, { imageUrl: URL.createObjectURL(file) });
+    await runTranscription(id, file);
   };
 
   const onSplitDragStart = () => {
+    const id = active.id;
     draggingSplit.current = true;
     document.body.style.cursor = "col-resize";
 
@@ -224,7 +272,7 @@ function SidePanel({
       if (!draggingSplit.current || !splitContainerRef.current) return;
       const rect = splitContainerRef.current.getBoundingClientRect();
       const pct = ((ev.clientX - rect.left) / rect.width) * 100;
-      setSplitX(Math.min(95, Math.max(5, pct)));
+      updateCopy(id, { splitX: Math.min(95, Math.max(5, pct)) });
     };
     const onUp = () => {
       draggingSplit.current = false;
@@ -237,47 +285,48 @@ function SidePanel({
   };
 
   const runSplit = async () => {
-    if (!imageUrl) return;
-    setError(null);
+    const id = active.id;
+    if (!active.imageUrl) return;
+    updateCopy(id, { error: null });
     try {
-      setCrops(await cropImageHalves(imageUrl, splitX));
+      updateCopy(id, { crops: await cropImageHalves(active.imageUrl, active.splitX) });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "تعذّر تقطيع الصورة");
+      updateCopy(id, { error: err instanceof Error ? err.message : "تعذّر تقطيع الصورة" });
     }
   };
 
   const useCrop = async (which: "left" | "right") => {
-    if (!crops) return;
+    const id = active.id;
+    if (!active.crops) return;
     const file = await dataUrlToFile(
-      crops[which],
-      `${(fileName ?? "page").replace(/\.[^.]+$/, "")}-${which}.png`
+      active.crops[which],
+      `${(active.fileName ?? "page").replace(/\.[^.]+$/, "")}-${which}.png`
     );
-    setImageUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return URL.createObjectURL(file);
+    if (active.imageUrl) URL.revokeObjectURL(active.imageUrl);
+    updateCopy(id, {
+      imageUrl: URL.createObjectURL(file),
+      fileName: file.name,
+      crops: null,
+      splitMode: false,
     });
-    setFileName(file.name);
-    setCrops(null);
-    setSplitMode(false);
-    await runTranscription(file);
+    await runTranscription(id, file);
   };
 
   const rotate = async () => {
-    if (!imageUrl) return;
-    setError(null);
+    const id = active.id;
+    if (!active.imageUrl) return;
+    updateCopy(id, { error: null });
     try {
-      const rotatedDataUrl = await rotateImage90(imageUrl);
+      const rotatedDataUrl = await rotateImage90(active.imageUrl);
       const file = await dataUrlToFile(
         rotatedDataUrl,
-        `${(fileName ?? "page").replace(/\.[^.]+$/, "")}-rot.png`
+        `${(active.fileName ?? "page").replace(/\.[^.]+$/, "")}-rot.png`
       );
-      setImageUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev);
-        return URL.createObjectURL(file);
-      });
-      setFileName(file.name);
+      const url = URL.createObjectURL(file);
+      URL.revokeObjectURL(active.imageUrl);
+      updateCopy(id, { imageUrl: url, fileName: file.name });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "تعذّر تدوير الصورة");
+      updateCopy(id, { error: err instanceof Error ? err.message : "تعذّر تدوير الصورة" });
     }
   };
 
@@ -327,6 +376,31 @@ function SidePanel({
         </div>
       </div>
 
+      {/* Copy tabs — multiple copies live inside this one panel */}
+      <div className="flex items-center gap-1 overflow-x-auto border-b border-border bg-paper-dim/30 px-2 py-1">
+        {copies.map((c) => (
+          <button
+            key={c.id}
+            onClick={() => setActiveCopyId(c.id)}
+            className={`shrink-0 rounded-md px-2 py-0.5 text-xs ${
+              c.id === activeCopyId
+                ? "bg-bronze text-white"
+                : "text-ink-soft hover:bg-white/60"
+            }`}
+            title={`نسخة ${c.label}`}
+          >
+            {c.label}
+          </button>
+        ))}
+        <button
+          onClick={addCopy}
+          className="shrink-0 rounded-md px-2 py-0.5 text-xs text-bronze hover:bg-white/60"
+          title="إضافة نسخة جديدة للمقابلة"
+        >
+          ＋
+        </button>
+      </div>
+
       <div className="flex items-center gap-0.5 border-b border-border bg-paper-dim/50 px-2 py-1">
         <label
           className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-ink-soft hover:bg-white/60"
@@ -344,8 +418,8 @@ function SidePanel({
           />
         </label>
         <button
-          onClick={() => setSplitMode((v) => !v)}
-          disabled={!imageUrl}
+          onClick={() => updateCopy(active.id, { splitMode: !active.splitMode })}
+          disabled={!active.imageUrl}
           title="قص الصورة إلى صفحتين"
           className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-white/60 disabled:opacity-30"
         >
@@ -353,7 +427,7 @@ function SidePanel({
         </button>
         <button
           onClick={rotate}
-          disabled={!imageUrl}
+          disabled={!active.imageUrl}
           title="تدوير 90°"
           className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-white/60 disabled:opacity-30"
         >
@@ -366,24 +440,24 @@ function SidePanel({
         onScroll={onScroll}
         className="flex-1 overflow-auto p-3"
       >
-        {fileName ? (
+        {active.fileName ? (
           <div className="flex h-full flex-col items-center gap-2 text-center text-sm text-ink-soft">
-            {imageUrl && !splitMode && !crops && (
+            {active.imageUrl && !active.splitMode && !active.crops && (
               <img
-                src={imageUrl}
-                alt={fileName}
+                src={active.imageUrl}
+                alt={active.fileName}
                 className="max-h-[50%] w-full rounded-md border border-border object-contain"
               />
             )}
 
-            {imageUrl && splitMode && !crops && (
+            {active.imageUrl && active.splitMode && !active.crops && (
               <div className="w-full">
                 <div ref={splitContainerRef} className="relative w-full select-none">
-                  <img src={imageUrl} alt={fileName} className="w-full rounded-md border border-border" />
+                  <img src={active.imageUrl} alt={active.fileName} className="w-full rounded-md border border-border" />
                   <div
                     onMouseDown={onSplitDragStart}
                     className="absolute top-0 h-full w-1.5 cursor-col-resize bg-bronze"
-                    style={{ left: `${splitX}%` }}
+                    style={{ left: `${active.splitX}%` }}
                     title="اسحب لتحديد خط القص بين الوجهين"
                   />
                 </div>
@@ -395,7 +469,7 @@ function SidePanel({
                     تنفيذ القص
                   </button>
                   <button
-                    onClick={() => setSplitMode(false)}
+                    onClick={() => updateCopy(active.id, { splitMode: false })}
                     className="rounded-md border border-border px-3 py-1 text-xs text-ink-soft hover:bg-paper-dim"
                   >
                     إلغاء
@@ -404,10 +478,10 @@ function SidePanel({
               </div>
             )}
 
-            {crops && (
+            {active.crops && (
               <div className="flex w-full gap-2">
                 <div className="flex-1">
-                  <img src={crops.right} alt="الوجه الأيمن" className="w-full rounded-md border border-border" />
+                  <img src={active.crops.right} alt="الوجه الأيمن" className="w-full rounded-md border border-border" />
                   <button
                     onClick={() => useCrop("right")}
                     className="mt-1 w-full rounded-md bg-bronze px-2 py-1 text-[11px] text-white hover:bg-bronze/90"
@@ -416,7 +490,7 @@ function SidePanel({
                   </button>
                 </div>
                 <div className="flex-1">
-                  <img src={crops.left} alt="الوجه الأيسر" className="w-full rounded-md border border-border" />
+                  <img src={active.crops.left} alt="الوجه الأيسر" className="w-full rounded-md border border-border" />
                   <button
                     onClick={() => useCrop("left")}
                     className="mt-1 w-full rounded-md bg-bronze px-2 py-1 text-[11px] text-white hover:bg-bronze/90"
@@ -427,9 +501,9 @@ function SidePanel({
               </div>
             )}
 
-            <span className="text-xs">{fileName}</span>
-            {busy && <span className="text-xs text-bronze">جارٍ التفريغ النصي…</span>}
-            {error && <span className="text-xs text-red-700">{error}</span>}
+            <span className="text-xs">{active.fileName}</span>
+            {active.busy && <span className="text-xs text-bronze">جارٍ التفريغ النصي…</span>}
+            {active.error && <span className="text-xs text-red-700">{active.error}</span>}
           </div>
         ) : (
           <label className="flex h-full min-h-[220px] cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border text-center text-sm text-ink-soft transition-colors hover:border-bronze hover:text-ink">
@@ -450,7 +524,7 @@ function SidePanel({
 
         <div className="mt-2 space-y-2">
           {IMAGE_NOTE_CATEGORIES.map((cat) => {
-            const catNotes = notes.filter((n) => n.category === cat.key);
+            const catNotes = active.notes.filter((n) => n.category === cat.key);
             return (
               <div key={cat.key} className="rounded-lg border border-border bg-white/70 p-2">
                 <div className="mb-1 flex items-center justify-between">
