@@ -263,25 +263,24 @@ function SidePanel({
     await runTranscription(id, file);
   };
 
-  const onSplitDragStart = () => {
-    const id = active.id;
+  /** Pointer-based (not mouse-only) drag for the split divider, so it
+   * works with touch input on mobile, not just a mouse. */
+  const onSplitPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
     draggingSplit.current = true;
+    e.currentTarget.setPointerCapture(e.pointerId);
     document.body.style.cursor = "col-resize";
-
-    const onMove = (ev: MouseEvent) => {
-      if (!draggingSplit.current || !splitContainerRef.current) return;
-      const rect = splitContainerRef.current.getBoundingClientRect();
-      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
-      updateCopy(id, { splitX: Math.min(95, Math.max(5, pct)) });
-    };
-    const onUp = () => {
-      draggingSplit.current = false;
-      document.body.style.cursor = "";
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+  };
+  const onSplitPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingSplit.current || !splitContainerRef.current) return;
+    const rect = splitContainerRef.current.getBoundingClientRect();
+    const pct = ((e.clientX - rect.left) / rect.width) * 100;
+    updateCopy(active.id, { splitX: Math.min(95, Math.max(5, pct)) });
+  };
+  const endSplitDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    draggingSplit.current = false;
+    document.body.style.cursor = "";
+    e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
   const runSplit = async () => {
@@ -295,21 +294,36 @@ function SidePanel({
     }
   };
 
+  /** Applies one crop as this copy's image. The OTHER half is never
+   * discarded — it becomes a new copy tab automatically, so splitting a
+   * spread always keeps both pages available. */
   const useCrop = async (which: "left" | "right") => {
     const id = active.id;
     if (!active.crops) return;
-    const file = await dataUrlToFile(
-      active.crops[which],
-      `${(active.fileName ?? "page").replace(/\.[^.]+$/, "")}-${which}.png`
-    );
+    const other = which === "left" ? "right" : "left";
+    const baseName = (active.fileName ?? "page").replace(/\.[^.]+$/, "");
+
+    const chosenFile = await dataUrlToFile(active.crops[which], `${baseName}-${which}.png`);
+    const otherFile = await dataUrlToFile(active.crops[other], `${baseName}-${other}.png`);
+
     if (active.imageUrl) URL.revokeObjectURL(active.imageUrl);
     updateCopy(id, {
-      imageUrl: URL.createObjectURL(file),
-      fileName: file.name,
+      imageUrl: URL.createObjectURL(chosenFile),
+      fileName: chosenFile.name,
       crops: null,
       splitMode: false,
     });
-    await runTranscription(id, file);
+
+    const otherLabel = COPY_LABELS[copies.length] ?? `نسخة ${copies.length + 1}`;
+    const otherCopy: Copy = {
+      ...makeEmptyCopy(otherLabel),
+      fileName: otherFile.name,
+      imageUrl: URL.createObjectURL(otherFile),
+    };
+    setCopies((prev) => [...prev, otherCopy]);
+
+    await runTranscription(id, chosenFile);
+    await runTranscription(otherCopy.id, otherFile);
   };
 
   const rotate = async () => {
@@ -394,10 +408,11 @@ function SidePanel({
         ))}
         <button
           onClick={addCopy}
-          className="shrink-0 rounded-md px-2 py-0.5 text-xs text-bronze hover:bg-white/60"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-dashed border-bronze/60 px-2 py-0.5 text-xs text-bronze hover:bg-white/60"
           title="إضافة نسخة جديدة للمقابلة"
         >
-          ＋
+          <span>＋</span>
+          <span>نسخة جديدة</span>
         </button>
       </div>
 
@@ -455,9 +470,12 @@ function SidePanel({
                 <div ref={splitContainerRef} className="relative w-full select-none">
                   <img src={active.imageUrl} alt={active.fileName} className="w-full rounded-md border border-border" />
                   <div
-                    onMouseDown={onSplitDragStart}
-                    className="absolute top-0 h-full w-1.5 cursor-col-resize bg-bronze"
-                    style={{ left: `${active.splitX}%` }}
+                    onPointerDown={onSplitPointerDown}
+                    onPointerMove={onSplitPointerMove}
+                    onPointerUp={endSplitDrag}
+                    onPointerCancel={endSplitDrag}
+                    className="absolute top-0 h-full w-4 touch-none cursor-col-resize bg-bronze/80"
+                    style={{ left: `calc(${active.splitX}% - 8px)` }}
                     title="اسحب لتحديد خط القص بين الوجهين"
                   />
                 </div>
@@ -564,95 +582,114 @@ function SidePanel({
   );
 }
 
-/** Compact formatting toolbar for the main editor. Calls real TipTap
- * (ProseMirror) commands directly on the editor instance — the document
- * model itself enforces correct behavior, so there's no hand-rolled
- * Range/execCommand logic left to get wrong. Shows one row of the 3 most
- * common actions; everything else lives behind a single "…" dropdown so
- * the toolbar never grows past one row. */
+/** Formatting toolbar for the main editor — the full set of common
+ * actions shown directly in one row (only "remove formatting", a rare
+ * action, is tucked behind "…"), per the standard toolbar convention:
+ * fold only what's genuinely rare, not most of the bar. Calls real
+ * TipTap (ProseMirror) commands directly on the editor instance. */
 function FormatToolbar({ editor }: { editor: Editor | null }) {
   const [menuOpen, setMenuOpen] = useState(false);
   if (!editor) return null;
 
-  const MAIN_BUTTONS = [
-    { title: "عريض", Icon: Bold, run: () => editor.chain().focus().toggleBold().run() },
-    { title: "مائل", Icon: Italic, run: () => editor.chain().focus().toggleItalic().run() },
-    { title: "تسطير", Icon: Underline, run: () => editor.chain().focus().toggleUnderline().run() },
-  ];
-
-  const MORE_ACTIONS = [
-    { label: "محاذاة يمين", Icon: AlignRight, run: () => editor.chain().focus().setTextAlign("right").run() },
-    { label: "محاذاة وسط", Icon: AlignCenter, run: () => editor.chain().focus().setTextAlign("center").run() },
-    { label: "محاذاة يسار", Icon: AlignLeft, run: () => editor.chain().focus().setTextAlign("left").run() },
-    { label: "ضبط", Icon: AlignJustify, run: () => editor.chain().focus().setTextAlign("justify").run() },
-    { label: "قائمة نقطية", Icon: List, run: () => editor.chain().focus().toggleBulletList().run() },
-    { label: "قائمة مرقّمة", Icon: ListOrdered, run: () => editor.chain().focus().toggleOrderedList().run() },
-    { label: "عنوان", Icon: Heading2, run: () => editor.chain().focus().toggleHeading({ level: 2 }).run() },
-    { label: "نص عادي", Icon: Pilcrow, run: () => editor.chain().focus().setParagraph().run() },
-    { label: "إزالة التنسيق", Icon: Eraser, run: () => editor.chain().focus().unsetAllMarks().clearNodes().run() },
+  const GROUPS: { title: string; Icon: typeof Bold; run: () => void }[][] = [
+    [
+      { title: "عريض", Icon: Bold, run: () => editor.chain().focus().toggleBold().run() },
+      { title: "مائل", Icon: Italic, run: () => editor.chain().focus().toggleItalic().run() },
+      { title: "تسطير", Icon: Underline, run: () => editor.chain().focus().toggleUnderline().run() },
+    ],
+    [
+      { title: "محاذاة يمين", Icon: AlignRight, run: () => editor.chain().focus().setTextAlign("right").run() },
+      { title: "محاذاة وسط", Icon: AlignCenter, run: () => editor.chain().focus().setTextAlign("center").run() },
+      { title: "محاذاة يسار", Icon: AlignLeft, run: () => editor.chain().focus().setTextAlign("left").run() },
+      { title: "ضبط", Icon: AlignJustify, run: () => editor.chain().focus().setTextAlign("justify").run() },
+    ],
+    [
+      { title: "قائمة نقطية", Icon: List, run: () => editor.chain().focus().toggleBulletList().run() },
+      { title: "قائمة مرقّمة", Icon: ListOrdered, run: () => editor.chain().focus().toggleOrderedList().run() },
+    ],
+    [
+      { title: "عنوان", Icon: Heading2, run: () => editor.chain().focus().toggleHeading({ level: 2 }).run() },
+      { title: "نص عادي", Icon: Pilcrow, run: () => editor.chain().focus().setParagraph().run() },
+    ],
   ];
 
   return (
-    <div className="relative flex items-center gap-0.5 border-b border-border bg-paper-dim/40 px-2 py-1">
-      <div className="flex items-center overflow-hidden rounded-md border border-border/70">
-        {MAIN_BUTTONS.map((b) => (
-          <button
-            key={b.title}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={b.run}
-            title={b.title}
-            className="flex h-7 w-7 items-center justify-center text-ink-soft hover:bg-white/60"
-          >
-            <b.Icon size={14} />
-          </button>
-        ))}
-      </div>
+    <div className="relative flex flex-wrap items-center gap-1 border-b border-border bg-paper-dim/40 px-2 py-1">
+      {GROUPS.map((group, gi) => (
+        <div key={gi} className="flex items-center overflow-hidden rounded-md border border-border/70">
+          {group.map((b) => (
+            <button
+              key={b.title}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={b.run}
+              title={b.title}
+              className="flex h-7 w-7 items-center justify-center text-ink-soft hover:bg-white/60"
+            >
+              <b.Icon size={14} />
+            </button>
+          ))}
+        </div>
+      ))}
 
       <button
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => setMenuOpen((v) => !v)}
-        title="مزيد من إجراءات التنسيق"
+        title="إزالة التنسيق"
         className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-white/60"
       >
         <MoreHorizontal size={15} />
       </button>
 
       {menuOpen && (
-        <div className="absolute right-0 top-full z-20 mt-1 w-44 rounded-md border border-border bg-white py-1 shadow-lg">
-          {MORE_ACTIONS.map((a, i) => (
-            <button
-              key={i}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                a.run();
-                setMenuOpen(false);
-              }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-right text-xs text-ink hover:bg-paper-dim"
-            >
-              <a.Icon size={13} className="text-ink-soft" />
-              {a.label}
-            </button>
-          ))}
+        <div className="absolute right-0 top-full z-20 mt-1 w-40 rounded-md border border-border bg-white py-1 shadow-lg">
+          <button
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              editor.chain().focus().unsetAllMarks().clearNodes().run();
+              setMenuOpen(false);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-right text-xs text-ink hover:bg-paper-dim"
+          >
+            <Eraser size={13} className="text-ink-soft" />
+            إزالة كل التنسيق
+          </button>
         </div>
       )}
     </div>
   );
 }
 
-/** Quick-insert toolbar for classical Arabic editing marks. */
+/** Insert-symbol button for classical Arabic editing marks — one button
+ * opening a small grid, instead of every mark shown inline all the time. */
 function SpecialCharsToolbar({ onInsert }: { onInsert: (ch: string) => void }) {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="flex items-center gap-1 border-b border-border bg-paper-dim/40 px-3 py-1.5">
-      {SPECIAL_CHARS.map((ch) => (
-        <button
-          key={ch}
-          onClick={() => onInsert(ch)}
-          className="min-w-[28px] rounded-md px-1.5 py-0.5 font-naskh text-base text-ink hover:bg-white/60"
-          title={`إدراج ${ch}`}
-        >
-          {ch}
-        </button>
-      ))}
+    <div className="relative border-b border-border bg-paper-dim/40 px-2 py-1">
+      <button
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setOpen((v) => !v)}
+        className="rounded-md px-2 py-1 text-xs text-ink-soft hover:bg-white/60"
+      >
+        إدراج رمز ﴿ ﴾ ⌄
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full z-20 mt-1 flex flex-wrap gap-1 rounded-md border border-border bg-white p-2 shadow-lg">
+          {SPECIAL_CHARS.map((ch) => (
+            <button
+              key={ch}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onInsert(ch);
+                setOpen(false);
+              }}
+              className="min-w-[28px] rounded-md px-1.5 py-0.5 font-naskh text-base text-ink hover:bg-paper-dim"
+              title={`إدراج ${ch}`}
+            >
+              {ch}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -827,36 +864,39 @@ function AssistToolbar({
 
 /** Drag handle between the center text panel and a side panel. Only ever
  * resizes the side panel's width, so the center panel's minimum is never
- * violated. */
+ * violated. Uses Pointer Events (not mouse-only events) with pointer
+ * capture, so dragging works on touch/mobile as well as with a mouse —
+ * plain mousemove/mouseup listeners never fire on touch input at all. */
 function ResizeHandle({ onDrag }: { onDrag: (deltaX: number) => void }) {
   const dragging = useRef(false);
   const lastX = useRef(0);
 
-  const onMouseDown = (e: React.MouseEvent) => {
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
     dragging.current = true;
     lastX.current = e.clientX;
+    e.currentTarget.setPointerCapture(e.pointerId);
     document.body.style.cursor = "col-resize";
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!dragging.current) return;
-      const delta = ev.clientX - lastX.current;
-      lastX.current = ev.clientX;
-      onDrag(delta);
-    };
-    const onMouseUp = () => {
-      dragging.current = false;
-      document.body.style.cursor = "";
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
-    };
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
+  };
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragging.current) return;
+    const delta = e.clientX - lastX.current;
+    lastX.current = e.clientX;
+    onDrag(delta);
+  };
+  const endDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    dragging.current = false;
+    document.body.style.cursor = "";
+    e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
   return (
     <div
-      onMouseDown={onMouseDown}
-      className="group flex w-3 shrink-0 cursor-col-resize items-center justify-center"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      className="group flex w-4 shrink-0 touch-none cursor-col-resize items-center justify-center"
     >
       <div className="h-16 w-1 rounded-full bg-border transition-colors group-hover:bg-bronze" />
     </div>
