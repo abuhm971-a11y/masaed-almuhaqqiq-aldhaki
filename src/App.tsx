@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import UnderlineExt from "@tiptap/extension-underline";
@@ -115,6 +115,68 @@ async function dataUrlToFile(dataUrl: string, filename: string): Promise<File> {
   return new File([blob], filename, { type: blob.type });
 }
 
+type DiffOp = { type: "equal" | "add" | "remove"; text: string };
+
+/** Standard word-level LCS diff. Splits on whitespace (keeping the
+ * whitespace tokens so spacing is preserved), builds the LCS table, then
+ * backtracks to produce a sequence of equal/add/remove operations. */
+function diffWords(a: string, b: string): DiffOp[] {
+  const aw = a.split(/(\s+)/).filter((t) => t.length > 0);
+  const bw = b.split(/(\s+)/).filter((t) => t.length > 0);
+  const n = aw.length;
+  const m = bw.length;
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = aw[i] === bw[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops: DiffOp[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (aw[i] === bw[j]) {
+      ops.push({ type: "equal", text: aw[i] });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ type: "remove", text: aw[i] });
+      i++;
+    } else {
+      ops.push({ type: "add", text: bw[j] });
+      j++;
+    }
+  }
+  while (i < n) ops.push({ type: "remove", text: aw[i++] });
+  while (j < m) ops.push({ type: "add", text: bw[j++] });
+  return ops;
+}
+
+/** Groups raw diff ops into runs, merging consecutive add/remove ops into
+ * one chunk (so a replaced phrase becomes a single "convert to footnote"
+ * unit instead of one button per word). */
+function groupDiffOps(ops: DiffOp[]): { equal?: string; removed?: string; added?: string }[] {
+  const groups: { equal?: string; removed?: string; added?: string }[] = [];
+  let i = 0;
+  while (i < ops.length) {
+    if (ops[i].type === "equal") {
+      let text = "";
+      while (i < ops.length && ops[i].type === "equal") text += ops[i++].text;
+      groups.push({ equal: text });
+    } else {
+      let removed = "";
+      let added = "";
+      while (i < ops.length && ops[i].type !== "equal") {
+        if (ops[i].type === "remove") removed += ops[i].text;
+        else added += ops[i].text;
+        i++;
+      }
+      groups.push({ removed: removed.trim(), added: added.trim() });
+    }
+  }
+  return groups;
+}
+
 /** Rotates an image 90° clockwise using canvas. Returns a PNG data URL. */
 function rotateImage90(imageUrl: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -147,6 +209,10 @@ type Copy = {
   imageUrl: string | null;
   busy: boolean;
   error: string | null;
+  /** This copy's own OCR'd text, kept separately from whatever ends up
+   * in the main editor — needed so two copies can be diffed against each
+   * other for the "فروق النسخ" comparison tool. */
+  transcript: string;
   notes: ImageNoteEntry[];
   splitMode: boolean;
   splitX: number;
@@ -163,6 +229,7 @@ function makeEmptyCopy(label: string): Copy {
     imageUrl: null,
     busy: false,
     error: null,
+    transcript: "",
     notes: [],
     splitMode: false,
     splitX: 50,
@@ -186,6 +253,7 @@ function SidePanel({
   scrollRef,
   onScroll,
   onTextRecognized,
+  onTranscriptReady,
 }: {
   side: PanelSide;
   title: string;
@@ -197,9 +265,10 @@ function SidePanel({
   scrollRef: React.RefObject<HTMLDivElement>;
   onScroll: () => void;
   onTextRecognized: (text: string) => void;
+  onTranscriptReady: (copyId: string, label: string, text: string) => void;
 }) {
   const [copies, setCopies] = useState<Copy[]>([
-    { id: "copy-1", label: COPY_LABELS[0], fileName: null, imageUrl: null, busy: false, error: null, notes: [], splitMode: false, splitX: 50, crops: null },
+    { id: "copy-1", label: COPY_LABELS[0], fileName: null, imageUrl: null, busy: false, error: null, transcript: "", notes: [], splitMode: false, splitX: 50, crops: null },
   ]);
   const [activeCopyId, setActiveCopyId] = useState("copy-1");
   const active = copies.find((c) => c.id === activeCopyId) ?? copies[0];
@@ -234,10 +303,12 @@ function SidePanel({
     });
   };
 
-  const runTranscription = async (id: string, file: File) => {
+  const runTranscription = async (id: string, label: string, file: File) => {
     updateCopy(id, { busy: true, error: null });
     try {
       const recognized = await transcribeImage(file);
+      updateCopy(id, { transcript: recognized });
+      onTranscriptReady(id, label, recognized);
       onTextRecognized(recognized);
     } catch (err) {
       updateCopy(id, {
@@ -260,7 +331,7 @@ function SidePanel({
     }
 
     updateCopy(id, { imageUrl: URL.createObjectURL(file) });
-    await runTranscription(id, file);
+    await runTranscription(id, active.label, file);
   };
 
   /** Pointer-based (not mouse-only) drag for the split divider, so it
@@ -322,8 +393,8 @@ function SidePanel({
     };
     setCopies((prev) => [...prev, otherCopy]);
 
-    await runTranscription(id, chosenFile);
-    await runTranscription(otherCopy.id, otherFile);
+    await runTranscription(id, active.label, chosenFile);
+    await runTranscription(otherCopy.id, otherLabel, otherFile);
   };
 
   const rotate = async () => {
@@ -581,6 +652,7 @@ function SidePanel({
     </div>
   );
 }
+
 
 /** Formatting toolbar for the main editor — the full set of common
  * actions shown directly in one row (only "remove formatting", a rare
@@ -862,6 +934,105 @@ function AssistToolbar({
   );
 }
 
+/** The actual core "فروق النسخ" (variant-copy collation) tool: pick any
+ * two OCR'd copies (from either the manuscript or printed panel), see a
+ * word-level diff between them, and turn each difference into a tagged
+ * "فروق النسخ" footnote with one tap — the specific, named-copy variant
+ * apparatus that real tahqiq methodology requires, not a generic
+ * "compare tool". */
+function CompareCopiesPanel({
+  transcripts,
+  onInsertFootnote,
+}: {
+  transcripts: { id: string; side: "manuscript" | "printed"; label: string; text: string }[];
+  onInsertFootnote: (categoryKey: FootnoteCategoryKey, presetText: string) => void;
+}) {
+  const [keyA, setKeyA] = useState("");
+  const [keyB, setKeyB] = useState("");
+
+  const sideLabel = (s: "manuscript" | "printed") => (s === "manuscript" ? "المخطوط" : "المطبوعة");
+  const optionLabel = (t: (typeof transcripts)[number]) => `${sideLabel(t.side)} – ${t.label}`;
+  const compositeKey = (t: { side: string; id: string }) => `${t.side}-${t.id}`;
+
+  const a = transcripts.find((t) => compositeKey(t) === keyA);
+  const b = transcripts.find((t) => compositeKey(t) === keyB);
+
+  const groups = useMemo(() => {
+    if (!a || !b) return null;
+    return groupDiffOps(diffWords(a.text, b.text));
+  }, [a, b]);
+
+  return (
+    <div className="border-t border-border bg-paper-dim/50 px-3 py-2">
+      <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+        <span className="font-semibold text-ink-soft">مقابلة النسخ:</span>
+        <select
+          value={keyA}
+          onChange={(e) => setKeyA(e.target.value)}
+          className="rounded-md border border-border bg-white/70 px-1.5 py-0.5 text-ink"
+        >
+          <option value="">— اختر نسخة —</option>
+          {transcripts.map((t) => (
+            <option key={compositeKey(t)} value={compositeKey(t)}>
+              {optionLabel(t)}
+            </option>
+          ))}
+        </select>
+        <span className="text-ink-soft">مقابل</span>
+        <select
+          value={keyB}
+          onChange={(e) => setKeyB(e.target.value)}
+          className="rounded-md border border-border bg-white/70 px-1.5 py-0.5 text-ink"
+        >
+          <option value="">— اختر نسخة —</option>
+          {transcripts.map((t) => (
+            <option key={compositeKey(t)} value={compositeKey(t)}>
+              {optionLabel(t)}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {transcripts.length === 0 && (
+        <p className="text-xs text-ink-soft">
+          استورد صورًا في لوح المخطوط أو المطبوعة أولًا حتى تُفرّغ نصيًا وتظهر هنا للمقابلة.
+        </p>
+      )}
+
+      {groups && (
+        <div dir="rtl" className="max-h-40 overflow-auto rounded-md border border-border bg-white/70 p-2 font-naskh text-sm leading-relaxed">
+          {groups.map((g, i) =>
+            g.equal !== undefined ? (
+              <span key={i} className="text-ink">{g.equal}</span>
+            ) : (
+              <span key={i} className="mx-0.5 inline-flex items-center gap-1 rounded bg-bronze-light/40 px-1">
+                {g.removed && (
+                  <span className="text-red-700 line-through">{g.removed}</span>
+                )}
+                {g.added && <span className="text-marginalia">{g.added}</span>}
+                <button
+                  onClick={() =>
+                    onInsertFootnote(
+                      "furuq",
+                      b && a
+                        ? `في نسخة (${b.label}): ${g.added || "سقط"}${g.removed ? ` بدل (${g.removed})` : ""}`
+                        : ""
+                    )
+                  }
+                  title="تحويل هذا الفرق إلى حاشية فروق نسخ عند موضع المؤشر"
+                  className="rounded-full bg-bronze px-1.5 text-[10px] text-white hover:bg-bronze/90"
+                >
+                  ＋حاشية
+                </button>
+              </span>
+            )
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Drag handle between the center text panel and a side panel. Only ever
  * resizes the side panel's width, so the center panel's minimum is never
  * violated. Uses Pointer Events (not mouse-only events) with pointer
@@ -910,6 +1081,22 @@ export default function App() {
   const [printedWidth, setPrintedWidth] = useState(DEFAULT_SIDE_WIDTH);
   const [syncMode, setSyncMode] = useState<SyncMode>("independent");
   const [footnotes, setFootnotes] = useState<FootnoteEntry[]>([]);
+
+  /** Every copy's OCR'd text from both side panels, gathered here so the
+   * comparison tool (which lives in the center text panel) can diff any
+   * two copies against each other, from either panel. */
+  const [copyTranscripts, setCopyTranscripts] = useState<
+    { id: string; side: "manuscript" | "printed"; label: string; text: string }[]
+  >([]);
+  const registerTranscript = useCallback(
+    (side: "manuscript" | "printed") => (copyId: string, label: string, text: string) => {
+      setCopyTranscripts((prev) => {
+        const others = prev.filter((t) => !(t.id === copyId && t.side === side));
+        return [...others, { id: copyId, side, label, text }];
+      });
+    },
+    []
+  );
 
   const manuscriptScrollRef = useRef<HTMLDivElement>(null);
   const printedScrollRef = useRef<HTMLDivElement>(null);
@@ -965,7 +1152,7 @@ export default function App() {
   /** Inserts an atomic footnoteMarker node at the caret. Being a real
    * ProseMirror node (not a DOM element spliced in via Range hacks), it
    * moves correctly with surrounding text through normal edits. */
-  const insertFootnote = useCallback((categoryKey: FootnoteCategoryKey) => {
+  const insertFootnote = useCallback((categoryKey: FootnoteCategoryKey, presetText = "") => {
     if (!editor) return;
     const nextIndex = footnotes.filter((f) => f.category === categoryKey).length + 1;
     const id = `fn-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -978,7 +1165,7 @@ export default function App() {
 
     setFootnotes((prev) => [
       ...prev,
-      { id, category: categoryKey, index: nextIndex, text: "", includeInPrint: true },
+      { id, category: categoryKey, index: nextIndex, text: presetText, includeInPrint: true },
     ]);
   }, [editor, footnotes]);
 
@@ -1134,6 +1321,7 @@ export default function App() {
           scrollRef={manuscriptScrollRef}
           onScroll={() => syncFromPanel("manuscript")}
           onTextRecognized={appendRecognizedText}
+          onTranscriptReady={registerTranscript("manuscript")}
         />
 
         {manuscriptState === "expanded" && (
@@ -1175,6 +1363,7 @@ export default function App() {
             )}
             <EditorContent editor={editor} />
           </div>
+          <CompareCopiesPanel transcripts={copyTranscripts} onInsertFootnote={insertFootnote} />
           <FootnotesPanel
             entries={footnotes}
             onInsert={insertFootnote}
@@ -1202,6 +1391,7 @@ export default function App() {
           scrollRef={printedScrollRef}
           onScroll={() => syncFromPanel("printed")}
           onTextRecognized={appendRecognizedText}
+          onTranscriptReady={registerTranscript("printed")}
         />
       </main>
 
