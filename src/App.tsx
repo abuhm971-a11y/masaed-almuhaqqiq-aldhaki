@@ -21,6 +21,7 @@ import {
   Upload,
   Scissors,
   RotateCw,
+  FileText,
 } from "lucide-react";
 import { transcribeImage, assistText } from "./lib/supabaseClient";
 
@@ -415,6 +416,25 @@ function SidePanel({
     }
   };
 
+  /** Explicit, user-triggered (re)transcription — a visible button
+   * instead of relying only on the automatic OCR-on-upload, so the user
+   * can see the action happen and retry it on demand. Rebuilds a File
+   * from the copy's existing blob URL since we don't keep the original
+   * File object around. */
+  const retranscribe = async () => {
+    if (!active.imageUrl) return;
+    updateCopy(active.id, { error: null });
+    try {
+      const blob = await (await fetch(active.imageUrl)).blob();
+      const file = new File([blob], active.fileName ?? "page.png", { type: blob.type || "image/png" });
+      await runTranscription(active.id, active.label, file);
+    } catch (err) {
+      updateCopy(active.id, {
+        error: err instanceof Error ? err.message : "تعذّر تجهيز الصورة لإعادة التفريغ",
+      });
+    }
+  };
+
   if (state === "hidden") return null;
 
   if (state === "collapsed") {
@@ -519,6 +539,15 @@ function SidePanel({
         >
           <RotateCw size={15} />
         </button>
+        <button
+          onClick={retranscribe}
+          disabled={!active.imageUrl || active.busy}
+          title="تفريغ النص من هذه الصورة"
+          className="flex h-7 items-center gap-1 rounded-md px-2 text-xs text-ink-soft hover:bg-white/60 disabled:opacity-30"
+        >
+          <FileText size={14} />
+          <span>{active.busy ? "جارٍ..." : "تفريغ"}</span>
+        </button>
       </div>
 
       <div
@@ -593,6 +622,13 @@ function SidePanel({
             <span className="text-xs">{active.fileName}</span>
             {active.busy && <span className="text-xs text-bronze">جارٍ التفريغ النصي…</span>}
             {active.error && <span className="text-xs text-red-700">{active.error}</span>}
+            {!active.busy && !active.error && (
+              <span className="text-xs text-ink-soft">
+                {active.transcript
+                  ? `تم التفريغ (${active.transcript.trim().split(/\s+/).length} كلمة)`
+                  : "لم يُفرَّغ نص بعد — اضغط \"تفريغ\""}
+              </span>
+            )}
           </div>
         ) : (
           <label className="flex h-full min-h-[220px] cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border text-center text-sm text-ink-soft transition-colors hover:border-bronze hover:text-ink">
@@ -995,7 +1031,7 @@ function CompareCopiesPanel({
 
       {transcripts.length === 0 && (
         <p className="text-xs text-ink-soft">
-          استورد صورًا في لوح المخطوط أو المطبوعة أولًا حتى تُفرّغ نصيًا وتظهر هنا للمقابلة.
+          استورد صورًا في لوح المخطوط أو المطبوعة أولًا حتى تُفرَّغ نصيًا وتظهر هنا للمقابلة.
         </p>
       )}
 
