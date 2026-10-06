@@ -24,6 +24,7 @@ import {
   FileText,
 } from "lucide-react";
 import { transcribeImage, assistText } from "./lib/supabaseClient";
+import { SpeedInsights } from "@vercel/speed-insights/react";
 
 type SyncMode = "independent" | "manuscript" | "printed";
 type PanelSide = "right" | "left";
@@ -1466,6 +1467,7 @@ export default function App() {
           </div>
         </div>
       )}
+      <SpeedInsights />
     </div>
   );
 }
