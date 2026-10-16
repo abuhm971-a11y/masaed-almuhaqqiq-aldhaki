@@ -202,18 +202,28 @@ function rotateImage90(imageUrl: string): Promise<string> {
  * status, split-tool state, and description/comment notes. Multiple
  * copies live inside the SAME panel as tabs — this is not multiple
  * panels, per the corrected design (comparison across copies is logical,
- * via tagged variant footnotes, not a side-by-side visual layout). */
+ * via tagged variant footnotes, not a side-by-side visual layout).
+ * `orderKey` is a decimal position: a split page's right half keeps the
+ * original's orderKey, the left half gets orderKey + 0.5, so inserting a
+ * split page never requires renumbering any other page. */
 type Copy = {
   id: string;
   label: string;
+  orderKey: number;
   fileName: string | null;
   imageUrl: string | null;
   busy: boolean;
   error: string | null;
   /** This copy's own OCR'd text, kept separately from whatever ends up
    * in the main editor — needed so two copies can be diffed against each
-   * other for the "فروق النسخ" comparison tool. */
+   * other for the "فروق النسخ" comparison tool, and so merging into the
+   * main text is an explicit, reviewable step rather than automatic. */
   transcript: string;
+  /** Whether the researcher has explicitly reviewed and approved this
+   * transcript for inclusion in the final merge. Vision-model OCR can
+   * "hallucinate" plausible text on historical scripts, so nothing is
+   * auto-inserted — editing the transcript after approval un-approves it. */
+  approved: boolean;
   notes: ImageNoteEntry[];
   splitMode: boolean;
   splitX: number;
@@ -222,15 +232,17 @@ type Copy = {
 
 const COPY_LABELS = ["أ", "ب", "ج", "د", "هـ", "و", "ز", "ح", "ط", "ي"];
 
-function makeEmptyCopy(label: string): Copy {
+function makeEmptyCopy(label: string, orderKey: number): Copy {
   return {
     id: `copy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     label,
+    orderKey,
     fileName: null,
     imageUrl: null,
     busy: false,
     error: null,
     transcript: "",
+    approved: false,
     notes: [],
     splitMode: false,
     splitX: 50,
@@ -242,7 +254,8 @@ function makeEmptyCopy(label: string): Copy {
  * vertical strip and can be hidden entirely. Never affects the center panel's
  * guaranteed minimum width. Holds one or more named copies (أ، ب، ج…) as
  * tabs within itself — every copy is OCR'd automatically via the AI
- * `transcribe` function as soon as it's added. */
+ * `transcribe` function as soon as it's added, but the result is only a
+ * reviewable draft until merged in explicitly via the merge tool. */
 function SidePanel({
   side,
   title,
@@ -253,8 +266,7 @@ function SidePanel({
   onHide,
   scrollRef,
   onScroll,
-  onTextRecognized,
-  onTranscriptReady,
+  onCopyUpdate,
 }: {
   side: PanelSide;
   title: string;
@@ -265,27 +277,51 @@ function SidePanel({
   onHide: () => void;
   scrollRef: React.RefObject<HTMLDivElement>;
   onScroll: () => void;
-  onTextRecognized: (text: string) => void;
-  onTranscriptReady: (copyId: string, label: string, text: string) => void;
+  onCopyUpdate: (copy: {
+    id: string;
+    label: string;
+    orderKey: number;
+    status: "not_transcribed" | "draft" | "approved";
+    transcript: string;
+  }) => void;
 }) {
-  const [copies, setCopies] = useState<Copy[]>([
-    { id: "copy-1", label: COPY_LABELS[0], fileName: null, imageUrl: null, busy: false, error: null, transcript: "", notes: [], splitMode: false, splitX: 50, crops: null },
-  ]);
-  const [activeCopyId, setActiveCopyId] = useState("copy-1");
+  const [copies, setCopies] = useState<Copy[]>([makeEmptyCopy(COPY_LABELS[0], 1)]);
+  const [activeCopyId, setActiveCopyId] = useState(copies[0].id);
   const active = copies.find((c) => c.id === activeCopyId) ?? copies[0];
 
   const splitContainerRef = useRef<HTMLDivElement>(null);
   const draggingSplit = useRef(false);
 
-  const updateCopy = (id: string, patch: Partial<Copy>) => {
-    setCopies((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+  const reportCopy = (c: Copy) => {
+    onCopyUpdate({
+      id: c.id,
+      label: c.label,
+      orderKey: c.orderKey,
+      status: c.approved ? "approved" : c.transcript ? "draft" : "not_transcribed",
+      transcript: c.transcript,
+    });
   };
+
+  const updateCopy = (id: string, patch: Partial<Copy>) => {
+    setCopies((prev) =>
+      prev.map((c) => {
+        if (c.id !== id) return c;
+        const next = { ...c, ...patch };
+        reportCopy(next);
+        return next;
+      })
+    );
+  };
+
+  const nextOrderKey = () =>
+    copies.length ? Math.max(...copies.map((c) => c.orderKey)) + 1 : 1;
 
   const addCopy = () => {
     const nextLabel = COPY_LABELS[copies.length] ?? `نسخة ${copies.length + 1}`;
-    const newCopy = makeEmptyCopy(nextLabel);
+    const newCopy = makeEmptyCopy(nextLabel, nextOrderKey());
     setCopies((prev) => [...prev, newCopy]);
     setActiveCopyId(newCopy.id);
+    reportCopy(newCopy);
   };
 
   const addNote = (categoryKey: ImageNoteCategoryKey) => {
@@ -304,13 +340,14 @@ function SidePanel({
     });
   };
 
-  const runTranscription = async (id: string, label: string, file: File) => {
-    updateCopy(id, { busy: true, error: null });
+  const runTranscription = async (id: string, file: File) => {
+    updateCopy(id, { busy: true, error: null, approved: false });
     try {
       const recognized = await transcribeImage(file);
       updateCopy(id, { transcript: recognized });
-      onTranscriptReady(id, label, recognized);
-      onTextRecognized(recognized);
+      // Deliberately NOT inserted into the main editor here — it becomes a
+      // reviewable draft; the user approves it below, then uses the merge
+      // tool to insert approved pages in order.
     } catch (err) {
       updateCopy(id, {
         error: err instanceof Error ? err.message : "تعذّر تفريغ النص من الصورة",
@@ -332,7 +369,7 @@ function SidePanel({
     }
 
     updateCopy(id, { imageUrl: URL.createObjectURL(file) });
-    await runTranscription(id, active.label, file);
+    await runTranscription(id, file);
   };
 
   /** Pointer-based (not mouse-only) drag for the split divider, so it
@@ -366,9 +403,11 @@ function SidePanel({
     }
   };
 
-  /** Applies one crop as this copy's image. The OTHER half is never
-   * discarded — it becomes a new copy tab automatically, so splitting a
-   * spread always keeps both pages available. */
+  /** Applies one crop as this copy's image (keeps this copy's orderKey —
+   * it's the "right" position). The OTHER half is never discarded — it
+   * becomes a new copy tab with orderKey = this.orderKey + 0.5, so it
+   * sits correctly between this page and the next without renumbering
+   * anything else. */
   const useCrop = async (which: "left" | "right") => {
     const id = active.id;
     if (!active.crops) return;
@@ -388,14 +427,15 @@ function SidePanel({
 
     const otherLabel = COPY_LABELS[copies.length] ?? `نسخة ${copies.length + 1}`;
     const otherCopy: Copy = {
-      ...makeEmptyCopy(otherLabel),
+      ...makeEmptyCopy(otherLabel, active.orderKey + 0.5),
       fileName: otherFile.name,
       imageUrl: URL.createObjectURL(otherFile),
     };
     setCopies((prev) => [...prev, otherCopy]);
+    reportCopy(otherCopy);
 
-    await runTranscription(id, active.label, chosenFile);
-    await runTranscription(otherCopy.id, otherLabel, otherFile);
+    await runTranscription(id, chosenFile);
+    await runTranscription(otherCopy.id, otherFile);
   };
 
   const rotate = async () => {
@@ -417,22 +457,26 @@ function SidePanel({
   };
 
   /** Explicit, user-triggered (re)transcription — a visible button
-   * instead of relying only on the automatic OCR-on-upload, so the user
-   * can see the action happen and retry it on demand. Rebuilds a File
-   * from the copy's existing blob URL since we don't keep the original
-   * File object around. */
+   * instead of relying only on the automatic OCR-on-upload. Rebuilds a
+   * File from the copy's existing blob URL since we don't keep the
+   * original File object around. */
   const retranscribe = async () => {
     if (!active.imageUrl) return;
     updateCopy(active.id, { error: null });
     try {
       const blob = await (await fetch(active.imageUrl)).blob();
       const file = new File([blob], active.fileName ?? "page.png", { type: blob.type || "image/png" });
-      await runTranscription(active.id, active.label, file);
+      await runTranscription(active.id, file);
     } catch (err) {
       updateCopy(active.id, {
         error: err instanceof Error ? err.message : "تعذّر تجهيز الصورة لإعادة التفريغ",
       });
     }
+  };
+
+  const approve = () => {
+    if (!active.transcript.trim()) return;
+    updateCopy(active.id, { approved: true });
   };
 
   if (state === "hidden") return null;
@@ -481,15 +525,18 @@ function SidePanel({
         </div>
       </div>
 
-      {/* Copy tabs — multiple copies live inside this one panel */}
+      {/* Copy tabs — multiple copies live inside this one panel, ordered
+          by orderKey so a split page's two halves appear in position */}
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border bg-paper-dim/30 px-2 py-1">
-        {copies.map((c) => (
+        {[...copies].sort((a, b) => a.orderKey - b.orderKey).map((c) => (
           <button
             key={c.id}
             onClick={() => setActiveCopyId(c.id)}
             className={`shrink-0 rounded-md px-2 py-0.5 text-xs ${
               c.id === activeCopyId
                 ? "bg-bronze text-white"
+                : c.approved
+                ? "border border-green-600/40 text-green-700 hover:bg-white/60"
                 : "text-ink-soft hover:bg-white/60"
             }`}
             title={`نسخة ${c.label}`}
@@ -561,7 +608,7 @@ function SidePanel({
               <img
                 src={active.imageUrl}
                 alt={active.fileName}
-                className="max-h-[50%] w-full rounded-md border border-border object-contain"
+                className="max-h-[40%] w-full rounded-md border border-border object-contain"
               />
             )}
 
@@ -622,16 +669,9 @@ function SidePanel({
             <span className="text-xs">{active.fileName}</span>
             {active.busy && <span className="text-xs text-bronze">جارٍ التفريغ النصي…</span>}
             {active.error && <span className="text-xs text-red-700">{active.error}</span>}
-            {!active.busy && !active.error && (
-              <span className="text-xs text-ink-soft">
-                {active.transcript
-                  ? `تم التفريغ (${active.transcript.trim().split(/\s+/).length} كلمة)`
-                  : "لم يُفرَّغ نص بعد — اضغط \"تفريغ\""}
-              </span>
-            )}
           </div>
         ) : (
-          <label className="flex h-full min-h-[220px] cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border text-center text-sm text-ink-soft transition-colors hover:border-bronze hover:text-ink">
+          <label className="flex h-full min-h-[160px] cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border text-center text-sm text-ink-soft transition-colors hover:border-bronze hover:text-ink">
             <span className="text-2xl">＋</span>
             <span>استيراد كتاب كامل</span>
             <span className="text-xs opacity-70">PDF، ملف مضغوط، أو صورة صفحة</span>
@@ -645,6 +685,34 @@ function SidePanel({
               }}
             />
           </label>
+        )}
+
+        {/* The reviewable OCR draft — never auto-inserted into the main
+            text. Editing it un-approves it; approving marks it ready for
+            the merge tool to pick up. */}
+        {active.fileName && (
+          <div className="mt-2 rounded-lg border border-border bg-white/70 p-2">
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-xs font-bold text-ink">
+                مسودة النص {active.approved && <span className="text-green-700">(معتمدة)</span>}
+              </span>
+              <button
+                onClick={approve}
+                disabled={!active.transcript.trim() || active.approved}
+                className="rounded-full bg-bronze px-2 py-0.5 text-[10px] text-white hover:bg-bronze/90 disabled:opacity-40"
+              >
+                اعتماد
+              </button>
+            </div>
+            <textarea
+              dir="rtl"
+              rows={3}
+              value={active.transcript}
+              onChange={(e) => updateCopy(active.id, { transcript: e.target.value, approved: false })}
+              placeholder="سيظهر النص المفرَّغ هنا للمراجعة…"
+              className="w-full resize-y rounded-md border border-border bg-white/80 p-1.5 text-xs leading-relaxed text-ink outline-none placeholder:text-ink-soft/50"
+            />
+          </div>
         )}
 
         <div className="mt-2 space-y-2">
@@ -977,25 +1045,26 @@ function AssistToolbar({
  * apparatus that real tahqiq methodology requires, not a generic
  * "compare tool". */
 function CompareCopiesPanel({
-  transcripts,
+  copies,
   onInsertFootnote,
 }: {
-  transcripts: { id: string; side: "manuscript" | "printed"; label: string; text: string }[];
+  copies: RegisteredCopy[];
   onInsertFootnote: (categoryKey: FootnoteCategoryKey, presetText: string) => void;
 }) {
   const [keyA, setKeyA] = useState("");
   const [keyB, setKeyB] = useState("");
 
   const sideLabel = (s: "manuscript" | "printed") => (s === "manuscript" ? "المخطوط" : "المطبوعة");
-  const optionLabel = (t: (typeof transcripts)[number]) => `${sideLabel(t.side)} – ${t.label}`;
+  const optionLabel = (t: RegisteredCopy) => `${sideLabel(t.side)} – ${t.label}`;
   const compositeKey = (t: { side: string; id: string }) => `${t.side}-${t.id}`;
 
-  const a = transcripts.find((t) => compositeKey(t) === keyA);
-  const b = transcripts.find((t) => compositeKey(t) === keyB);
+  const withText = copies.filter((c) => c.transcript);
+  const a = withText.find((t) => compositeKey(t) === keyA);
+  const b = withText.find((t) => compositeKey(t) === keyB);
 
   const groups = useMemo(() => {
     if (!a || !b) return null;
-    return groupDiffOps(diffWords(a.text, b.text));
+    return groupDiffOps(diffWords(a.transcript, b.transcript));
   }, [a, b]);
 
   return (
@@ -1008,7 +1077,7 @@ function CompareCopiesPanel({
           className="rounded-md border border-border bg-white/70 px-1.5 py-0.5 text-ink"
         >
           <option value="">— اختر نسخة —</option>
-          {transcripts.map((t) => (
+          {withText.map((t) => (
             <option key={compositeKey(t)} value={compositeKey(t)}>
               {optionLabel(t)}
             </option>
@@ -1021,7 +1090,7 @@ function CompareCopiesPanel({
           className="rounded-md border border-border bg-white/70 px-1.5 py-0.5 text-ink"
         >
           <option value="">— اختر نسخة —</option>
-          {transcripts.map((t) => (
+          {withText.map((t) => (
             <option key={compositeKey(t)} value={compositeKey(t)}>
               {optionLabel(t)}
             </option>
@@ -1029,7 +1098,7 @@ function CompareCopiesPanel({
         </select>
       </div>
 
-      {transcripts.length === 0 && (
+      {withText.length === 0 && (
         <p className="text-xs text-ink-soft">
           استورد صورًا في لوح المخطوط أو المطبوعة أولًا حتى تُفرَّغ نصيًا وتظهر هنا للمقابلة.
         </p>
@@ -1063,6 +1132,79 @@ function CompareCopiesPanel({
               </span>
             )
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The staged-merge tool: lists every registered page from both panels,
+ * sorted by side then orderKey, flags any unapproved page as a gap, and
+ * only inserts the approved pages into the editor — in order — once the
+ * user explicitly confirms after reviewing this preview. This is what
+ * lets a researcher transcribe/approve pages one at a time (avoiding
+ * whole-book-at-once OCR risk) while still guaranteeing a correct final
+ * assembly. */
+function MergeTool({
+  copies,
+  onMerge,
+}: {
+  copies: RegisteredCopy[];
+  onMerge: (text: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  // Every registered page is shown (including unapproved ones, as flagged
+  // gaps) so nothing is silently skipped when merging.
+  const ordered = [...copies].sort((a, b) =>
+    a.side === b.side ? a.orderKey - b.orderKey : a.side.localeCompare(b.side)
+  );
+
+  const confirmMerge = () => {
+    const approved = ordered.filter((c) => c.status === "approved");
+    const text = approved.map((c) => c.transcript.trim()).join("\n\n");
+    onMerge(text);
+    setOpen(false);
+  };
+
+  return (
+    <div className="border-t border-border bg-paper-dim/40 px-3 py-2">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        disabled={copies.length === 0}
+        className="rounded-md border border-border bg-white/60 px-3 py-1 text-xs text-ink hover:bg-white disabled:opacity-40"
+      >
+        دمج الصفحات المعتمدة ومعاينتها
+      </button>
+
+      {open && (
+        <div className="mt-2 rounded-lg border border-border bg-white/70 p-2">
+          <ol dir="rtl" className="max-h-48 space-y-1 overflow-auto text-xs">
+            {ordered.map((c) => (
+              <li
+                key={`${c.side}-${c.id}`}
+                className={`flex items-center justify-between rounded px-2 py-1 ${
+                  c.status === "approved"
+                    ? "bg-green-50 text-green-800"
+                    : "bg-red-50 text-red-700"
+                }`}
+              >
+                <span>
+                  {c.side === "manuscript" ? "المخطوط" : "المطبوعة"} — نسخة {c.label} (ترتيب {c.orderKey})
+                </span>
+                <span>
+                  {c.status === "approved"
+                    ? `${c.transcript.trim().slice(0, 20)}…`
+                    : "⚠ غير معتمدة — فجوة"}
+                </span>
+              </li>
+            ))}
+          </ol>
+          <button
+            onClick={confirmMerge}
+            className="mt-2 rounded-md bg-bronze px-3 py-1 text-xs text-white hover:bg-bronze/90"
+          >
+            تأكيد الدمج وإدراجه في النص
+          </button>
         </div>
       )}
     </div>
@@ -1110,6 +1252,15 @@ function ResizeHandle({ onDrag }: { onDrag: (deltaX: number) => void }) {
   );
 }
 
+type RegisteredCopy = {
+  id: string;
+  side: "manuscript" | "printed";
+  label: string;
+  orderKey: number;
+  status: "not_transcribed" | "draft" | "approved";
+  transcript: string;
+};
+
 export default function App() {
   const [manuscriptState, setManuscriptState] = useState<PanelState>("expanded");
   const [printedState, setPrintedState] = useState<PanelState>("expanded");
@@ -1118,19 +1269,17 @@ export default function App() {
   const [syncMode, setSyncMode] = useState<SyncMode>("independent");
   const [footnotes, setFootnotes] = useState<FootnoteEntry[]>([]);
 
-  /** Every copy's OCR'd text from both side panels, gathered here so the
-   * comparison tool (which lives in the center text panel) can diff any
-   * two copies against each other, from either panel. */
-  const [copyTranscripts, setCopyTranscripts] = useState<
-    { id: string; side: "manuscript" | "printed"; label: string; text: string }[]
-  >([]);
-  const registerTranscript = useCallback(
-    (side: "manuscript" | "printed") => (copyId: string, label: string, text: string) => {
-      setCopyTranscripts((prev) => {
-        const others = prev.filter((t) => !(t.id === copyId && t.side === side));
-        return [...others, { id: copyId, side, label, text }];
-      });
-    },
+  /** Every copy's registration from both side panels (status, order,
+   * transcript) — feeds both the comparison tool and the merge tool. */
+  const [registeredCopies, setRegisteredCopies] = useState<RegisteredCopy[]>([]);
+  const onCopyUpdate = useCallback(
+    (side: "manuscript" | "printed") =>
+      (c: { id: string; label: string; orderKey: number; status: RegisteredCopy["status"]; transcript: string }) => {
+        setRegisteredCopies((prev) => {
+          const others = prev.filter((t) => !(t.id === c.id && t.side === side));
+          return [...others, { ...c, side }];
+        });
+      },
     []
   );
 
@@ -1215,14 +1364,14 @@ export default function App() {
     );
   }, []);
 
-  /** Appends OCR text from a newly added manuscript/printed copy at the
-   * end of the document, separated by a couple of line breaks if the
-   * document already has content. */
-  const appendRecognizedText = useCallback((recognized: string) => {
-    if (!recognized.trim() || !editor) return;
+  /** Inserts the merged, approved-pages text at the end of the document,
+   * separated by a couple of line breaks if the document already has
+   * content. Called only from the explicit merge-confirmation step. */
+  const insertMergedText = useCallback((merged: string) => {
+    if (!merged.trim() || !editor) return;
     const chain = editor.chain().focus("end");
     if (!editor.isEmpty) chain.setHardBreak().setHardBreak();
-    chain.insertContent(recognized).run();
+    chain.insertContent(merged).run();
   }, [editor]);
 
   /** Full-text AI actions replace the whole document with plain
@@ -1356,8 +1505,7 @@ export default function App() {
           onHide={() => setManuscriptState("hidden")}
           scrollRef={manuscriptScrollRef}
           onScroll={() => syncFromPanel("manuscript")}
-          onTextRecognized={appendRecognizedText}
-          onTranscriptReady={registerTranscript("manuscript")}
+          onCopyUpdate={onCopyUpdate("manuscript")}
         />
 
         {manuscriptState === "expanded" && (
@@ -1399,7 +1547,8 @@ export default function App() {
             )}
             <EditorContent editor={editor} />
           </div>
-          <CompareCopiesPanel transcripts={copyTranscripts} onInsertFootnote={insertFootnote} />
+          <MergeTool copies={registeredCopies} onMerge={insertMergedText} />
+          <CompareCopiesPanel copies={registeredCopies} onInsertFootnote={insertFootnote} />
           <FootnotesPanel
             entries={footnotes}
             onInsert={insertFootnote}
@@ -1426,8 +1575,7 @@ export default function App() {
           onHide={() => setPrintedState("hidden")}
           scrollRef={printedScrollRef}
           onScroll={() => syncFromPanel("printed")}
-          onTextRecognized={appendRecognizedText}
-          onTranscriptReady={registerTranscript("printed")}
+          onCopyUpdate={onCopyUpdate("printed")}
         />
       </main>
 
