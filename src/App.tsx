@@ -1,1340 +1,40 @@
-import { useCallback, useMemo, useRef, useState } from "react";
-import { useEditor, EditorContent, type Editor } from "@tiptap/react";
+import { EditorContent, useEditor } from "@tiptap/react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Download, FolderOpen, ZoomIn, ZoomOut } from "lucide-react";
 import StarterKit from "@tiptap/starter-kit";
 import UnderlineExt from "@tiptap/extension-underline";
 import TextAlign from "@tiptap/extension-text-align";
-import { FootnoteMark } from "./lib/footnoteExtension";
+import { AssistToolbar } from "./components/AssistToolbar";
+import { CompareCopiesPanel } from "./components/CompareCopiesPanel";
+import { FootnotesPanel } from "./components/FootnotesPanel";
+import { FormatToolbar } from "./components/FormatToolbar";
+import { MergeTool } from "./components/MergeTool";
+import { ReferenceBankPanel } from "./components/ReferenceBankPanel";
+import { ResizeHandle } from "./components/ResizeHandle";
+import { SidePanel } from "./components/SidePanel";
+import { SpecialCharsToolbar } from "./components/SpecialCharsToolbar";
 import {
-  Bold,
-  Italic,
-  Underline,
-  AlignRight,
-  AlignCenter,
-  AlignLeft,
-  AlignJustify,
-  List,
-  ListOrdered,
-  Heading2,
-  Pilcrow,
-  Eraser,
-  MoreHorizontal,
-  Upload,
-  Scissors,
-  RotateCw,
-  FileText,
-} from "lucide-react";
-import { transcribeImage, assistText } from "./lib/supabaseClient";
-
-type SyncMode = "independent" | "manuscript" | "printed";
-type PanelSide = "right" | "left";
-type PanelState = "expanded" | "collapsed" | "hidden";
-
-const MIN_CENTER_WIDTH = 360;
-const DEFAULT_SIDE_WIDTH = 340;
-const MIN_SIDE_WIDTH = 220;
-const MAX_SIDE_WIDTH = 640;
-
-const SPECIAL_CHARS = ["﴿", "﴾", "«", "»", "[", "]", "(", ")", "…"];
-
-const FOOTNOTE_CATEGORIES = [
-  { key: "takhrij", label: "التخريج والعزو" },
-  { key: "furuq", label: "فروق النسخ" },
-  { key: "gharib", label: "شرح الغريب" },
-  { key: "tahqiq", label: "تعليقات المحقق" },
-] as const;
-
-type FootnoteCategoryKey = (typeof FOOTNOTE_CATEGORIES)[number]["key"];
-
-type FootnoteEntry = {
-  id: string;
-  category: FootnoteCategoryKey;
-  index: number;
-  text: string;
-  includeInPrint: boolean;
-};
-
-const IMAGE_NOTE_CATEGORIES = [
-  { key: "desc", label: "توصيف" },
-  { key: "comment", label: "تعليق" },
-] as const;
-
-type ImageNoteCategoryKey = (typeof IMAGE_NOTE_CATEGORIES)[number]["key"];
-
-type ImageNoteEntry = {
-  id: string;
-  category: ImageNoteCategoryKey;
-  index: number;
-  text: string;
-};
-
-const ASSIST_ACTIONS = [
-  { key: "tashkeel", label: "تشكيل" },
-  { key: "tasheeh", label: "تصحيح" },
-  { key: "hamzat", label: "توحيد الهمزات" },
-  { key: "tarqeem", label: "ترقيم" },
-  { key: "faharis", label: "فهارس" },
-] as const;
-
-/** Crops a double-page-spread image into its right and left halves at
- * `splitPercent` (0-100, measured from the visual left edge), following
- * the same manual-split-line approach used by book-scan tools like
- * ScanTailor. Returns two PNG data URLs. */
-function cropImageHalves(
-  imageUrl: string,
-  splitPercent: number
-): Promise<{ left: string; right: string }> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const splitX = Math.round((img.naturalWidth * splitPercent) / 100);
-      const makeCrop = (sx: number, sw: number) => {
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, sw);
-        canvas.height = img.naturalHeight;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) throw new Error("تعذّر إنشاء لوحة الرسم لقص الصورة");
-        ctx.drawImage(img, sx, 0, sw, img.naturalHeight, 0, 0, sw, img.naturalHeight);
-        return canvas.toDataURL("image/png");
-      };
-      try {
-        resolve({
-          left: makeCrop(0, splitX),
-          right: makeCrop(splitX, img.naturalWidth - splitX),
-        });
-      } catch (err) {
-        reject(err);
-      }
-    };
-    img.onerror = () => reject(new Error("تعذّر تحميل الصورة للقص"));
-    img.src = imageUrl;
-  });
-}
-
-async function dataUrlToFile(dataUrl: string, filename: string): Promise<File> {
-  const res = await fetch(dataUrl);
-  const blob = await res.blob();
-  return new File([blob], filename, { type: blob.type });
-}
-
-type DiffOp = { type: "equal" | "add" | "remove"; text: string };
-
-/** Standard word-level LCS diff. Splits on whitespace (keeping the
- * whitespace tokens so spacing is preserved), builds the LCS table, then
- * backtracks to produce a sequence of equal/add/remove operations. */
-function diffWords(a: string, b: string): DiffOp[] {
-  const aw = a.split(/(\s+)/).filter((t) => t.length > 0);
-  const bw = b.split(/(\s+)/).filter((t) => t.length > 0);
-  const n = aw.length;
-  const m = bw.length;
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = aw[i] === bw[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    }
-  }
-  const ops: DiffOp[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (aw[i] === bw[j]) {
-      ops.push({ type: "equal", text: aw[i] });
-      i++;
-      j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      ops.push({ type: "remove", text: aw[i] });
-      i++;
-    } else {
-      ops.push({ type: "add", text: bw[j] });
-      j++;
-    }
-  }
-  while (i < n) ops.push({ type: "remove", text: aw[i++] });
-  while (j < m) ops.push({ type: "add", text: bw[j++] });
-  return ops;
-}
-
-/** Groups raw diff ops into runs, merging consecutive add/remove ops into
- * one chunk (so a replaced phrase becomes a single "convert to footnote"
- * unit instead of one button per word). */
-function groupDiffOps(ops: DiffOp[]): { equal?: string; removed?: string; added?: string }[] {
-  const groups: { equal?: string; removed?: string; added?: string }[] = [];
-  let i = 0;
-  while (i < ops.length) {
-    if (ops[i].type === "equal") {
-      let text = "";
-      while (i < ops.length && ops[i].type === "equal") text += ops[i++].text;
-      groups.push({ equal: text });
-    } else {
-      let removed = "";
-      let added = "";
-      while (i < ops.length && ops[i].type !== "equal") {
-        if (ops[i].type === "remove") removed += ops[i].text;
-        else added += ops[i].text;
-        i++;
-      }
-      groups.push({ removed: removed.trim(), added: added.trim() });
-    }
-  }
-  return groups;
-}
-
-/** Rotates an image 90° clockwise using canvas. Returns a PNG data URL. */
-function rotateImage90(imageUrl: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = img.naturalHeight;
-      canvas.height = img.naturalWidth;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return reject(new Error("تعذّر إنشاء لوحة الرسم للتدوير"));
-      ctx.translate(canvas.width / 2, canvas.height / 2);
-      ctx.rotate(Math.PI / 2);
-      ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
-      resolve(canvas.toDataURL("image/png"));
-    };
-    img.onerror = () => reject(new Error("تعذّر تحميل الصورة للتدوير"));
-    img.src = imageUrl;
-  });
-}
-
-/** One manuscript/printed copy within a side panel: its own image, OCR
- * status, split-tool state, and description/comment notes. Multiple
- * copies live inside the SAME panel as tabs — this is not multiple
- * panels, per the corrected design (comparison across copies is logical,
- * via tagged variant footnotes, not a side-by-side visual layout).
- * `orderKey` is a decimal position: a split page's right half keeps the
- * original's orderKey, the left half gets orderKey + 0.5, so inserting a
- * split page never requires renumbering any other page. */
-type Copy = {
-  id: string;
-  label: string;
-  orderKey: number;
-  fileName: string | null;
-  imageUrl: string | null;
-  busy: boolean;
-  error: string | null;
-  /** This copy's own OCR'd text, kept separately from whatever ends up
-   * in the main editor — needed so two copies can be diffed against each
-   * other for the "فروق النسخ" comparison tool, and so merging into the
-   * main text is an explicit, reviewable step rather than automatic. */
-  transcript: string;
-  /** Whether the researcher has explicitly reviewed and approved this
-   * transcript for inclusion in the final merge. Vision-model OCR can
-   * "hallucinate" plausible text on historical scripts, so nothing is
-   * auto-inserted — editing the transcript after approval un-approves it. */
-  approved: boolean;
-  notes: ImageNoteEntry[];
-  splitMode: boolean;
-  splitX: number;
-  crops: { left: string; right: string } | null;
-};
-
-const COPY_LABELS = ["أ", "ب", "ج", "د", "هـ", "و", "ز", "ح", "ط", "ي"];
-
-function makeEmptyCopy(label: string, orderKey: number): Copy {
-  return {
-    id: `copy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    label,
-    orderKey,
-    fileName: null,
-    imageUrl: null,
-    busy: false,
-    error: null,
-    transcript: "",
-    approved: false,
-    notes: [],
-    splitMode: false,
-    splitX: 50,
-    crops: null,
-  };
-}
-
-/** A side panel (manuscript image or printed image). Collapses to a closed
- * vertical strip and can be hidden entirely. Never affects the center panel's
- * guaranteed minimum width. Holds one or more named copies (أ، ب، ج…) as
- * tabs within itself — every copy is OCR'd automatically via the AI
- * `transcribe` function as soon as it's added, but the result is only a
- * reviewable draft until merged in explicitly via the merge tool. */
-function SidePanel({
-  side,
-  title,
-  state,
-  width,
-  onExpand,
-  onCollapse,
-  onHide,
-  scrollRef,
-  onScroll,
-  onCopyUpdate,
-}: {
-  side: PanelSide;
-  title: string;
-  state: PanelState;
-  width: number;
-  onExpand: () => void;
-  onCollapse: () => void;
-  onHide: () => void;
-  scrollRef: React.RefObject<HTMLDivElement>;
-  onScroll: () => void;
-  onCopyUpdate: (copy: {
-    id: string;
-    label: string;
-    orderKey: number;
-    status: "not_transcribed" | "draft" | "approved";
-    transcript: string;
-  }) => void;
-}) {
-  const [copies, setCopies] = useState<Copy[]>([makeEmptyCopy(COPY_LABELS[0], 1)]);
-  const [activeCopyId, setActiveCopyId] = useState(copies[0].id);
-  const active = copies.find((c) => c.id === activeCopyId) ?? copies[0];
-
-  const splitContainerRef = useRef<HTMLDivElement>(null);
-  const draggingSplit = useRef(false);
-
-  const reportCopy = (c: Copy) => {
-    onCopyUpdate({
-      id: c.id,
-      label: c.label,
-      orderKey: c.orderKey,
-      status: c.approved ? "approved" : c.transcript ? "draft" : "not_transcribed",
-      transcript: c.transcript,
-    });
-  };
-
-  const updateCopy = (id: string, patch: Partial<Copy>) => {
-    setCopies((prev) =>
-      prev.map((c) => {
-        if (c.id !== id) return c;
-        const next = { ...c, ...patch };
-        reportCopy(next);
-        return next;
-      })
-    );
-  };
-
-  const nextOrderKey = () =>
-    copies.length ? Math.max(...copies.map((c) => c.orderKey)) + 1 : 1;
-
-  const addCopy = () => {
-    const nextLabel = COPY_LABELS[copies.length] ?? `نسخة ${copies.length + 1}`;
-    const newCopy = makeEmptyCopy(nextLabel, nextOrderKey());
-    setCopies((prev) => [...prev, newCopy]);
-    setActiveCopyId(newCopy.id);
-    reportCopy(newCopy);
-  };
-
-  const addNote = (categoryKey: ImageNoteCategoryKey) => {
-    const nextIndex = active.notes.filter((n) => n.category === categoryKey).length + 1;
-    const newNote: ImageNoteEntry = {
-      id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      category: categoryKey,
-      index: nextIndex,
-      text: "",
-    };
-    updateCopy(active.id, { notes: [...active.notes, newNote] });
-  };
-  const updateNoteText = (noteId: string, text: string) => {
-    updateCopy(active.id, {
-      notes: active.notes.map((n) => (n.id === noteId ? { ...n, text } : n)),
-    });
-  };
-
-  const runTranscription = async (id: string, file: File) => {
-    updateCopy(id, { busy: true, error: null, approved: false });
-    try {
-      const recognized = await transcribeImage(file);
-      updateCopy(id, { transcript: recognized });
-      // Deliberately NOT inserted into the main editor here — it becomes a
-      // reviewable draft; the user approves it below, then uses the merge
-      // tool to insert approved pages in order.
-    } catch (err) {
-      updateCopy(id, {
-        error: err instanceof Error ? err.message : "تعذّر تفريغ النص من الصورة",
-      });
-    } finally {
-      updateCopy(id, { busy: false });
-    }
-  };
-
-  const handleFile = async (file: File) => {
-    const id = active.id;
-    if (active.imageUrl) URL.revokeObjectURL(active.imageUrl);
-    updateCopy(id, { fileName: file.name, error: null, crops: null, splitMode: false });
-
-    if (!file.type.startsWith("image/")) {
-      updateCopy(id, { imageUrl: null });
-      // PDF/ZIP splitting into pages isn't built yet — see README.
-      return;
-    }
-
-    updateCopy(id, { imageUrl: URL.createObjectURL(file) });
-    await runTranscription(id, file);
-  };
-
-  /** Pointer-based (not mouse-only) drag for the split divider, so it
-   * works with touch input on mobile, not just a mouse. */
-  const onSplitPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    draggingSplit.current = true;
-    e.currentTarget.setPointerCapture(e.pointerId);
-    document.body.style.cursor = "col-resize";
-  };
-  const onSplitPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!draggingSplit.current || !splitContainerRef.current) return;
-    const rect = splitContainerRef.current.getBoundingClientRect();
-    const pct = ((e.clientX - rect.left) / rect.width) * 100;
-    updateCopy(active.id, { splitX: Math.min(95, Math.max(5, pct)) });
-  };
-  const endSplitDrag = (e: React.PointerEvent<HTMLDivElement>) => {
-    draggingSplit.current = false;
-    document.body.style.cursor = "";
-    e.currentTarget.releasePointerCapture(e.pointerId);
-  };
-
-  const runSplit = async () => {
-    const id = active.id;
-    if (!active.imageUrl) return;
-    updateCopy(id, { error: null });
-    try {
-      updateCopy(id, { crops: await cropImageHalves(active.imageUrl, active.splitX) });
-    } catch (err) {
-      updateCopy(id, { error: err instanceof Error ? err.message : "تعذّر تقطيع الصورة" });
-    }
-  };
-
-  /** Applies one crop as this copy's image (keeps this copy's orderKey —
-   * it's the "right" position). The OTHER half is never discarded — it
-   * becomes a new copy tab with orderKey = this.orderKey + 0.5, so it
-   * sits correctly between this page and the next without renumbering
-   * anything else. */
-  const useCrop = async (which: "left" | "right") => {
-    const id = active.id;
-    if (!active.crops) return;
-    const other = which === "left" ? "right" : "left";
-    const baseName = (active.fileName ?? "page").replace(/\.[^.]+$/, "");
-
-    const chosenFile = await dataUrlToFile(active.crops[which], `${baseName}-${which}.png`);
-    const otherFile = await dataUrlToFile(active.crops[other], `${baseName}-${other}.png`);
-
-    if (active.imageUrl) URL.revokeObjectURL(active.imageUrl);
-    updateCopy(id, {
-      imageUrl: URL.createObjectURL(chosenFile),
-      fileName: chosenFile.name,
-      crops: null,
-      splitMode: false,
-    });
-
-    const otherLabel = COPY_LABELS[copies.length] ?? `نسخة ${copies.length + 1}`;
-    const otherCopy: Copy = {
-      ...makeEmptyCopy(otherLabel, active.orderKey + 0.5),
-      fileName: otherFile.name,
-      imageUrl: URL.createObjectURL(otherFile),
-    };
-    setCopies((prev) => [...prev, otherCopy]);
-    reportCopy(otherCopy);
-
-    await runTranscription(id, chosenFile);
-    await runTranscription(otherCopy.id, otherFile);
-  };
-
-  const rotate = async () => {
-    const id = active.id;
-    if (!active.imageUrl) return;
-    updateCopy(id, { error: null });
-    try {
-      const rotatedDataUrl = await rotateImage90(active.imageUrl);
-      const file = await dataUrlToFile(
-        rotatedDataUrl,
-        `${(active.fileName ?? "page").replace(/\.[^.]+$/, "")}-rot.png`
-      );
-      const url = URL.createObjectURL(file);
-      URL.revokeObjectURL(active.imageUrl);
-      updateCopy(id, { imageUrl: url, fileName: file.name });
-    } catch (err) {
-      updateCopy(id, { error: err instanceof Error ? err.message : "تعذّر تدوير الصورة" });
-    }
-  };
-
-  /** Explicit, user-triggered (re)transcription — a visible button
-   * instead of relying only on the automatic OCR-on-upload. Rebuilds a
-   * File from the copy's existing blob URL since we don't keep the
-   * original File object around. */
-  const retranscribe = async () => {
-    if (!active.imageUrl) return;
-    updateCopy(active.id, { error: null });
-    try {
-      const blob = await (await fetch(active.imageUrl)).blob();
-      const file = new File([blob], active.fileName ?? "page.png", { type: blob.type || "image/png" });
-      await runTranscription(active.id, file);
-    } catch (err) {
-      updateCopy(active.id, {
-        error: err instanceof Error ? err.message : "تعذّر تجهيز الصورة لإعادة التفريغ",
-      });
-    }
-  };
-
-  const approve = () => {
-    if (!active.transcript.trim()) return;
-    updateCopy(active.id, { approved: true });
-  };
-
-  if (state === "hidden") return null;
-
-  if (state === "collapsed") {
-    return (
-      <button
-        onClick={onExpand}
-        className="flex w-11 shrink-0 flex-col items-center justify-between rounded-xl border border-border bg-paper-dim py-4 text-ink-soft transition-colors hover:bg-bronze-light/30"
-        title={`فتح لوح ${title}`}
-      >
-        <span className="text-xs">⤢</span>
-        <span
-          className="font-ui text-sm font-medium tracking-wide"
-          style={{ writingMode: "vertical-rl" }}
-        >
-          {title}
-        </span>
-        <span className="text-xs opacity-60">{side === "right" ? "◂" : "▸"}</span>
-      </button>
-    );
-  }
-
-  return (
-    <div
-      className="flex shrink-0 flex-col rounded-xl border border-border bg-paper-dim/60 overflow-hidden"
-      style={{ width }}
-    >
-      <div className="flex items-center justify-between border-b border-border bg-paper-dim px-3 py-2">
-        <span className="font-ui text-sm font-semibold text-ink">{title}</span>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={onCollapse}
-            className="rounded-md px-2 py-1 text-xs text-ink-soft hover:bg-white/40"
-            title="طي اللوح"
-          >
-            طي
-          </button>
-          <button
-            onClick={onHide}
-            className="rounded-md px-2 py-1 text-xs text-ink-soft hover:bg-white/40"
-            title="إخفاء اللوح تمامًا"
-          >
-            إخفاء
-          </button>
-        </div>
-      </div>
-
-      {/* Copy tabs — multiple copies live inside this one panel, ordered
-          by orderKey so a split page's two halves appear in position */}
-      <div className="flex items-center gap-1 overflow-x-auto border-b border-border bg-paper-dim/30 px-2 py-1">
-        {[...copies].sort((a, b) => a.orderKey - b.orderKey).map((c) => (
-          <button
-            key={c.id}
-            onClick={() => setActiveCopyId(c.id)}
-            className={`shrink-0 rounded-md px-2 py-0.5 text-xs ${
-              c.id === activeCopyId
-                ? "bg-bronze text-white"
-                : c.approved
-                ? "border border-green-600/40 text-green-700 hover:bg-white/60"
-                : "text-ink-soft hover:bg-white/60"
-            }`}
-            title={`نسخة ${c.label}`}
-          >
-            {c.label}
-          </button>
-        ))}
-        <button
-          onClick={addCopy}
-          className="flex shrink-0 items-center gap-1 rounded-md border border-dashed border-bronze/60 px-2 py-0.5 text-xs text-bronze hover:bg-white/60"
-          title="إضافة نسخة جديدة للمقابلة"
-        >
-          <span>＋</span>
-          <span>نسخة جديدة</span>
-        </button>
-      </div>
-
-      <div className="flex items-center gap-0.5 border-b border-border bg-paper-dim/50 px-2 py-1">
-        <label
-          className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-ink-soft hover:bg-white/60"
-          title="استيراد صورة"
-        >
-          <Upload size={15} />
-          <input
-            type="file"
-            accept=".pdf,.zip,image/*"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) handleFile(f);
-            }}
-          />
-        </label>
-        <button
-          onClick={() => updateCopy(active.id, { splitMode: !active.splitMode })}
-          disabled={!active.imageUrl}
-          title="قص الصورة إلى صفحتين"
-          className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-white/60 disabled:opacity-30"
-        >
-          <Scissors size={15} />
-        </button>
-        <button
-          onClick={rotate}
-          disabled={!active.imageUrl}
-          title="تدوير 90°"
-          className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-white/60 disabled:opacity-30"
-        >
-          <RotateCw size={15} />
-        </button>
-        <button
-          onClick={retranscribe}
-          disabled={!active.imageUrl || active.busy}
-          title="تفريغ النص من هذه الصورة"
-          className="flex h-7 items-center gap-1 rounded-md px-2 text-xs text-ink-soft hover:bg-white/60 disabled:opacity-30"
-        >
-          <FileText size={14} />
-          <span>{active.busy ? "جارٍ..." : "تفريغ"}</span>
-        </button>
-      </div>
-
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        className="flex-1 overflow-auto p-3"
-      >
-        {active.fileName ? (
-          <div className="flex h-full flex-col items-center gap-2 text-center text-sm text-ink-soft">
-            {active.imageUrl && !active.splitMode && !active.crops && (
-              <img
-                src={active.imageUrl}
-                alt={active.fileName}
-                className="max-h-[40%] w-full rounded-md border border-border object-contain"
-              />
-            )}
-
-            {active.imageUrl && active.splitMode && !active.crops && (
-              <div className="w-full">
-                <div ref={splitContainerRef} className="relative w-full select-none">
-                  <img src={active.imageUrl} alt={active.fileName} className="w-full rounded-md border border-border" />
-                  <div
-                    onPointerDown={onSplitPointerDown}
-                    onPointerMove={onSplitPointerMove}
-                    onPointerUp={endSplitDrag}
-                    onPointerCancel={endSplitDrag}
-                    className="absolute top-0 h-full w-4 touch-none cursor-col-resize bg-bronze/80"
-                    style={{ left: `calc(${active.splitX}% - 8px)` }}
-                    title="اسحب لتحديد خط القص بين الوجهين"
-                  />
-                </div>
-                <div className="mt-2 flex justify-center gap-2">
-                  <button
-                    onClick={runSplit}
-                    className="rounded-md bg-bronze px-3 py-1 text-xs text-white hover:bg-bronze/90"
-                  >
-                    تنفيذ القص
-                  </button>
-                  <button
-                    onClick={() => updateCopy(active.id, { splitMode: false })}
-                    className="rounded-md border border-border px-3 py-1 text-xs text-ink-soft hover:bg-paper-dim"
-                  >
-                    إلغاء
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {active.crops && (
-              <div className="flex w-full gap-2">
-                <div className="flex-1">
-                  <img src={active.crops.right} alt="الوجه الأيمن" className="w-full rounded-md border border-border" />
-                  <button
-                    onClick={() => useCrop("right")}
-                    className="mt-1 w-full rounded-md bg-bronze px-2 py-1 text-[11px] text-white hover:bg-bronze/90"
-                  >
-                    استخدام الوجه الأيمن
-                  </button>
-                </div>
-                <div className="flex-1">
-                  <img src={active.crops.left} alt="الوجه الأيسر" className="w-full rounded-md border border-border" />
-                  <button
-                    onClick={() => useCrop("left")}
-                    className="mt-1 w-full rounded-md bg-bronze px-2 py-1 text-[11px] text-white hover:bg-bronze/90"
-                  >
-                    استخدام الوجه الأيسر
-                  </button>
-                </div>
-              </div>
-            )}
-
-            <span className="text-xs">{active.fileName}</span>
-            {active.busy && <span className="text-xs text-bronze">جارٍ التفريغ النصي…</span>}
-            {active.error && <span className="text-xs text-red-700">{active.error}</span>}
-          </div>
-        ) : (
-          <label className="flex h-full min-h-[160px] cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border text-center text-sm text-ink-soft transition-colors hover:border-bronze hover:text-ink">
-            <span className="text-2xl">＋</span>
-            <span>استيراد كتاب كامل</span>
-            <span className="text-xs opacity-70">PDF، ملف مضغوط، أو صورة صفحة</span>
-            <input
-              type="file"
-              accept=".pdf,.zip,image/*"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) handleFile(f);
-              }}
-            />
-          </label>
-        )}
-
-        {/* The reviewable OCR draft — never auto-inserted into the main
-            text. Editing it un-approves it; approving marks it ready for
-            the merge tool to pick up. */}
-        {active.fileName && (
-          <div className="mt-2 rounded-lg border border-border bg-white/70 p-2">
-            <div className="mb-1 flex items-center justify-between">
-              <span className="text-xs font-bold text-ink">
-                مسودة النص {active.approved && <span className="text-green-700">(معتمدة)</span>}
-              </span>
-              <button
-                onClick={approve}
-                disabled={!active.transcript.trim() || active.approved}
-                className="rounded-full bg-bronze px-2 py-0.5 text-[10px] text-white hover:bg-bronze/90 disabled:opacity-40"
-              >
-                اعتماد
-              </button>
-            </div>
-            <textarea
-              dir="rtl"
-              rows={3}
-              value={active.transcript}
-              onChange={(e) => updateCopy(active.id, { transcript: e.target.value, approved: false })}
-              placeholder="سيظهر النص المفرَّغ هنا للمراجعة…"
-              className="w-full resize-y rounded-md border border-border bg-white/80 p-1.5 text-xs leading-relaxed text-ink outline-none placeholder:text-ink-soft/50"
-            />
-          </div>
-        )}
-
-        <div className="mt-2 space-y-2">
-          {IMAGE_NOTE_CATEGORIES.map((cat) => {
-            const catNotes = active.notes.filter((n) => n.category === cat.key);
-            return (
-              <div key={cat.key} className="rounded-lg border border-border bg-white/70 p-2">
-                <div className="mb-1 flex items-center justify-between">
-                  <span className="text-xs font-bold text-ink">{cat.label}</span>
-                  <button
-                    onClick={() => addNote(cat.key)}
-                    className="rounded-full border border-border bg-white/60 px-2 py-0.5 text-[10px] text-bronze hover:bg-white"
-                  >
-                    ＋ إضافة
-                  </button>
-                </div>
-                {catNotes.length > 0 && (
-                  <div className="divide-y divide-border/50">
-                    {catNotes.map((n) => (
-                      <div key={n.id} className="flex items-start gap-2 py-1.5 first:pt-0 last:pb-0">
-                        <span className="mt-2 shrink-0 text-[11px] font-semibold text-ink-soft">
-                          {n.index}.
-                        </span>
-                        <textarea
-                          dir="rtl"
-                          rows={2}
-                          value={n.text}
-                          onChange={(e) => updateNoteText(n.id, e.target.value)}
-                          placeholder={`اكتب ${cat.label} هنا…`}
-                          className="min-w-0 flex-1 resize-y rounded-md border border-border bg-white/80 p-1.5 text-xs leading-relaxed text-ink outline-none placeholder:text-ink-soft/50"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-
-/** Formatting toolbar for the main editor — the full set of common
- * actions shown directly in one row (only "remove formatting", a rare
- * action, is tucked behind "…"), per the standard toolbar convention:
- * fold only what's genuinely rare, not most of the bar. Calls real
- * TipTap (ProseMirror) commands directly on the editor instance. */
-function FormatToolbar({ editor }: { editor: Editor | null }) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  if (!editor) return null;
-
-  const GROUPS: { title: string; Icon: typeof Bold; run: () => void }[][] = [
-    [
-      { title: "عريض", Icon: Bold, run: () => editor.chain().focus().toggleBold().run() },
-      { title: "مائل", Icon: Italic, run: () => editor.chain().focus().toggleItalic().run() },
-      { title: "تسطير", Icon: Underline, run: () => editor.chain().focus().toggleUnderline().run() },
-    ],
-    [
-      { title: "محاذاة يمين", Icon: AlignRight, run: () => editor.chain().focus().setTextAlign("right").run() },
-      { title: "محاذاة وسط", Icon: AlignCenter, run: () => editor.chain().focus().setTextAlign("center").run() },
-      { title: "محاذاة يسار", Icon: AlignLeft, run: () => editor.chain().focus().setTextAlign("left").run() },
-      { title: "ضبط", Icon: AlignJustify, run: () => editor.chain().focus().setTextAlign("justify").run() },
-    ],
-    [
-      { title: "قائمة نقطية", Icon: List, run: () => editor.chain().focus().toggleBulletList().run() },
-      { title: "قائمة مرقّمة", Icon: ListOrdered, run: () => editor.chain().focus().toggleOrderedList().run() },
-    ],
-    [
-      { title: "عنوان", Icon: Heading2, run: () => editor.chain().focus().toggleHeading({ level: 2 }).run() },
-      { title: "نص عادي", Icon: Pilcrow, run: () => editor.chain().focus().setParagraph().run() },
-    ],
-  ];
-
-  return (
-    <div className="relative flex flex-wrap items-center gap-1 border-b border-border bg-paper-dim/40 px-2 py-1">
-      {GROUPS.map((group, gi) => (
-        <div key={gi} className="flex items-center overflow-hidden rounded-md border border-border/70">
-          {group.map((b) => (
-            <button
-              key={b.title}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={b.run}
-              title={b.title}
-              className="flex h-7 w-7 items-center justify-center text-ink-soft hover:bg-white/60"
-            >
-              <b.Icon size={14} />
-            </button>
-          ))}
-        </div>
-      ))}
-
-      <button
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => setMenuOpen((v) => !v)}
-        title="إزالة التنسيق"
-        className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-white/60"
-      >
-        <MoreHorizontal size={15} />
-      </button>
-
-      {menuOpen && (
-        <div className="absolute right-0 top-full z-20 mt-1 w-40 rounded-md border border-border bg-white py-1 shadow-lg">
-          <button
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              editor.chain().focus().unsetAllMarks().clearNodes().run();
-              setMenuOpen(false);
-            }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-right text-xs text-ink hover:bg-paper-dim"
-          >
-            <Eraser size={13} className="text-ink-soft" />
-            إزالة كل التنسيق
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Insert-symbol button for classical Arabic editing marks — one button
- * opening a small grid, instead of every mark shown inline all the time. */
-function SpecialCharsToolbar({ onInsert }: { onInsert: (ch: string) => void }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="relative border-b border-border bg-paper-dim/40 px-2 py-1">
-      <button
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => setOpen((v) => !v)}
-        className="rounded-md px-2 py-1 text-xs text-ink-soft hover:bg-white/60"
-      >
-        إدراج رمز ﴿ ﴾ ⌄
-      </button>
-      {open && (
-        <div className="absolute right-0 top-full z-20 mt-1 flex flex-wrap gap-1 rounded-md border border-border bg-white p-2 shadow-lg">
-          {SPECIAL_CHARS.map((ch) => (
-            <button
-              key={ch}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                onInsert(ch);
-                setOpen(false);
-              }}
-              className="min-w-[28px] rounded-md px-1.5 py-0.5 font-naskh text-base text-ink hover:bg-paper-dim"
-              title={`إدراج ${ch}`}
-            >
-              {ch}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** The four fixed footnote categories, with insert buttons and an editable
- * list of every footnote entered so far. Each entry has a checkbox that
- * controls whether it's included ("مُثبَتة") when the document is printed —
- * unchecking it never deletes the marker from the text, only excludes it
- * from print output. */
-function FootnotesPanel({
-  entries,
-  onInsert,
-  onChangeText,
-  onToggleInclude,
-}: {
-  entries: FootnoteEntry[];
-  onInsert: (categoryKey: FootnoteCategoryKey) => void;
-  onChangeText: (id: string, text: string) => void;
-  onToggleInclude: (id: string) => void;
-}) {
-  const countFor = (key: FootnoteCategoryKey) =>
-    entries.filter((e) => e.category === key).length;
-
-  return (
-    <div className="border-t border-border bg-paper-dim/40">
-      <div className="flex flex-wrap items-center gap-2 px-3 py-2">
-        <span className="text-xs font-semibold text-ink-soft">حواشي المتن:</span>
-        {FOOTNOTE_CATEGORIES.map((cat) => (
-          <button
-            key={cat.key}
-            id={`footnote-insert-${cat.key}`}
-            onClick={() => onInsert(cat.key)}
-            className="flex items-center gap-1.5 rounded-full border border-border bg-white/60 px-3 py-1 text-xs text-ink hover:bg-white"
-            title={`إدراج حاشية: ${cat.label}`}
-          >
-            <span>{cat.label}</span>
-            <span className="rounded-full bg-bronze-light/50 px-1.5 text-[10px] text-ink">
-              {countFor(cat.key)}
-            </span>
-            <span className="text-bronze">＋</span>
-          </button>
-        ))}
-      </div>
-
-      {entries.length > 0 && (
-        <div className="max-h-72 overflow-auto border-t border-border/60 px-3 py-2">
-          {FOOTNOTE_CATEGORIES.filter((cat) => countFor(cat.key) > 0).map((cat) => (
-            <div key={cat.key} className="mb-3 last:mb-0 rounded-lg border border-border bg-white/70 p-2">
-              <div className="mb-2 text-xs font-bold text-ink">{cat.label}</div>
-              <div className="divide-y divide-border/50">
-                {entries
-                  .filter((e) => e.category === cat.key)
-                  .map((entry) => (
-                    <div
-                      key={entry.id}
-                      className={`flex items-start gap-2 py-2 first:pt-0 last:pb-0 ${
-                        entry.includeInPrint ? "" : "opacity-50"
-                      }`}
-                    >
-                      <span className="mt-2 shrink-0 text-xs font-semibold text-ink-soft">
-                        {entry.index}.
-                      </span>
-                      <textarea
-                        id={`footnote-input-${entry.id}`}
-                        dir="rtl"
-                        rows={2}
-                        value={entry.text}
-                        onChange={(e) => onChangeText(entry.id, e.target.value)}
-                        placeholder="اكتب نص الحاشية هنا…"
-                        className="min-w-0 flex-1 resize-y rounded-md border border-border bg-white/80 p-2 font-naskh text-base leading-relaxed text-ink outline-none placeholder:text-ink-soft/50"
-                      />
-                      <label
-                        className="mt-1 flex shrink-0 flex-col items-center gap-0.5 text-[10px] text-ink-soft"
-                        title="إثبات هذه الحاشية عند الطباعة"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={entry.includeInPrint}
-                          onChange={() => onToggleInclude(entry.id)}
-                          className="h-3.5 w-3.5 accent-bronze"
-                        />
-                        <span>إثبات</span>
-                      </label>
-                    </div>
-                  ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  applied?: boolean;
-  dismissed?: boolean;
-  error?: boolean;
-};
-
-/** A real chat box for "مساعد المحقق" — a message transcript with its own
- * text input and send button, and the 5 fixed actions rendered as a row
- * of quick-suggestion chips around the input (not scattered loose
- * buttons). Clicking a chip sends that action as a message, exactly like
- * typing it; free text goes through the same send path. Results are
- * never applied to the main text automatically — each assistant message
- * carries its own "تطبيق على النص"/"تجاهل" controls. */
-function AssistToolbar({
-  getText,
-  onApply,
-}: {
-  getText: () => string;
-  onApply: (newText: string) => void;
-}) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const send = async (label: string, action: (typeof ASSIST_ACTIONS)[number]["key"] | "custom") => {
-    const text = getText();
-    if (!text.trim() || busy) return;
-    const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: "user", text: label };
-    setMessages((prev) => [...prev, userMsg]);
-    setBusy(true);
-    try {
-      // The 5 fixed actions are guaranteed to work (unchanged server
-      // contract). Free-form text is sent as a "custom" action — this
-      // requires a small Supabase Edge Function update to answer openly;
-      // until that's deployed, it will surface as an error message below
-      // rather than silently doing nothing.
-      const resultText = await assistText(text, action as (typeof ASSIST_ACTIONS)[number]["key"]);
-      setMessages((prev) => [
-        ...prev,
-        { id: `a-${Date.now()}`, role: "assistant", text: resultText },
-      ]);
-    } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `a-${Date.now()}`,
-          role: "assistant",
-          text: err instanceof Error ? err.message : "تعذّر تنفيذ الطلب",
-          error: true,
-        },
-      ]);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const sendDraft = () => {
-    const text = draft.trim();
-    if (!text) return;
-    setDraft("");
-    send(text, "custom");
-  };
-
-  return (
-    <div className="border-t border-border bg-paper-dim/60 px-3 py-2">
-      <div className="mb-1 text-xs font-semibold text-ink-soft">مساعد المحقق</div>
-
-      {messages.length > 0 && (
-        <div dir="rtl" className="mb-2 max-h-48 space-y-2 overflow-auto rounded-lg border border-border bg-white/50 p-2">
-          {messages.map((m) => (
-            <div key={m.id} className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}>
-              <div
-                className={`max-w-[85%] rounded-lg px-2 py-1.5 text-xs ${
-                  m.role === "user"
-                    ? "bg-bronze-light/40 text-ink"
-                    : m.error
-                    ? "bg-red-50 text-red-700"
-                    : "bg-white text-ink border border-border"
-                }`}
-              >
-                <p className="whitespace-pre-wrap font-naskh leading-relaxed">{m.text}</p>
-                {m.role === "assistant" && !m.error && !m.applied && !m.dismissed && (
-                  <div className="mt-1.5 flex gap-1.5">
-                    <button
-                      onClick={() => {
-                        onApply(m.text);
-                        setMessages((prev) => prev.map((x) => (x.id === m.id ? { ...x, applied: true } : x)));
-                      }}
-                      className="rounded-md bg-bronze px-2 py-0.5 text-[10px] text-white hover:bg-bronze/90"
-                    >
-                      تطبيق على النص
-                    </button>
-                    <button
-                      onClick={() =>
-                        setMessages((prev) => prev.map((x) => (x.id === m.id ? { ...x, dismissed: true } : x)))
-                      }
-                      className="rounded-md border border-border px-2 py-0.5 text-[10px] text-ink-soft hover:bg-paper-dim"
-                    >
-                      تجاهل
-                    </button>
-                  </div>
-                )}
-                {m.applied && <p className="mt-1 text-[10px] text-green-700">✓ طُبّق على النص</p>}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Quick-suggestion chips — the 5 fixed actions, as suggestions
-          around the input, not standalone scattered buttons */}
-      <div className="mb-1.5 flex flex-wrap gap-1.5">
-        {ASSIST_ACTIONS.map((action) => (
-          <button
-            key={action.key}
-            onClick={() => send(action.label, action.key)}
-            disabled={busy}
-            className="rounded-full border border-border bg-white/60 px-2.5 py-1 text-[11px] text-ink hover:bg-white disabled:opacity-50"
-          >
-            {action.label}
-          </button>
-        ))}
-      </div>
-
-      {/* The chat box itself: a real input with its own send button */}
-      <div className="flex items-center gap-1.5">
-        <input
-          type="text"
-          dir="rtl"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") sendDraft();
-          }}
-          disabled={busy}
-          placeholder="اكتب طلبك لمساعد المحقق هنا…"
-          className="min-w-0 flex-1 rounded-md border border-border bg-white/80 px-2 py-1.5 text-xs text-ink outline-none placeholder:text-ink-soft/50 disabled:opacity-60"
-        />
-        <button
-          onClick={sendDraft}
-          disabled={busy || !draft.trim()}
-          className="shrink-0 rounded-md bg-bronze px-3 py-1.5 text-xs text-white hover:bg-bronze/90 disabled:opacity-40"
-        >
-          {busy ? "جارٍ…" : "إرسال"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/** The actual core "فروق النسخ" (variant-copy collation) tool: pick any
- * two OCR'd copies (from either the manuscript or printed panel), see a
- * word-level diff between them, and turn each difference into a tagged
- * "فروق النسخ" footnote with one tap — the specific, named-copy variant
- * apparatus that real tahqiq methodology requires, not a generic
- * "compare tool". */
-function CompareCopiesPanel({
-  copies,
-  onInsertFootnote,
-}: {
-  copies: RegisteredCopy[];
-  onInsertFootnote: (categoryKey: FootnoteCategoryKey, presetText: string) => void;
-}) {
-  const [keyA, setKeyA] = useState("");
-  const [keyB, setKeyB] = useState("");
-
-  const sideLabel = (s: "manuscript" | "printed") => (s === "manuscript" ? "المخطوط" : "المطبوعة");
-  const optionLabel = (t: RegisteredCopy) => `${sideLabel(t.side)} – ${t.label}`;
-  const compositeKey = (t: { side: string; id: string }) => `${t.side}-${t.id}`;
-
-  const withText = copies.filter((c) => c.transcript);
-  const a = withText.find((t) => compositeKey(t) === keyA);
-  const b = withText.find((t) => compositeKey(t) === keyB);
-
-  const groups = useMemo(() => {
-    if (!a || !b) return null;
-    return groupDiffOps(diffWords(a.transcript, b.transcript));
-  }, [a, b]);
-
-  return (
-    <div className="border-t border-border bg-paper-dim/50 px-3 py-2">
-      <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
-        <span className="font-semibold text-ink-soft">مقابلة النسخ:</span>
-        <select
-          value={keyA}
-          onChange={(e) => setKeyA(e.target.value)}
-          className="rounded-md border border-border bg-white/70 px-1.5 py-0.5 text-ink"
-        >
-          <option value="">— اختر نسخة —</option>
-          {withText.map((t) => (
-            <option key={compositeKey(t)} value={compositeKey(t)}>
-              {optionLabel(t)}
-            </option>
-          ))}
-        </select>
-        <span className="text-ink-soft">مقابل</span>
-        <select
-          value={keyB}
-          onChange={(e) => setKeyB(e.target.value)}
-          className="rounded-md border border-border bg-white/70 px-1.5 py-0.5 text-ink"
-        >
-          <option value="">— اختر نسخة —</option>
-          {withText.map((t) => (
-            <option key={compositeKey(t)} value={compositeKey(t)}>
-              {optionLabel(t)}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {withText.length === 0 && (
-        <p className="text-xs text-ink-soft">
-          استورد صورًا في لوح المخطوط أو المطبوعة أولًا حتى تُفرَّغ نصيًا وتظهر هنا للمقابلة.
-        </p>
-      )}
-
-      {groups && (
-        <div dir="rtl" className="max-h-40 overflow-auto rounded-md border border-border bg-white/70 p-2 font-naskh text-sm leading-relaxed">
-          {groups.map((g, i) =>
-            g.equal !== undefined ? (
-              <span key={i} className="text-ink">{g.equal}</span>
-            ) : (
-              <span key={i} className="mx-0.5 inline-flex items-center gap-1 rounded bg-bronze-light/40 px-1">
-                {g.removed && (
-                  <span className="text-red-700 line-through">{g.removed}</span>
-                )}
-                {g.added && <span className="text-marginalia">{g.added}</span>}
-                <button
-                  onClick={() =>
-                    onInsertFootnote(
-                      "furuq",
-                      b && a
-                        ? `في نسخة (${b.label}): ${g.added || "سقط"}${g.removed ? ` بدل (${g.removed})` : ""}`
-                        : ""
-                    )
-                  }
-                  title="تحويل هذا الفرق إلى حاشية فروق نسخ عند موضع المؤشر"
-                  className="rounded-full bg-bronze px-1.5 text-[10px] text-white hover:bg-bronze/90"
-                >
-                  ＋حاشية
-                </button>
-              </span>
-            )
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** The staged-merge tool: lists every registered page from both panels,
- * sorted by side then orderKey, flags any unapproved page as a gap, and
- * only inserts the approved pages into the editor — in order — once the
- * user explicitly confirms after reviewing this preview. This is what
- * lets a researcher transcribe/approve pages one at a time (avoiding
- * whole-book-at-once OCR risk) while still guaranteeing a correct final
- * assembly. */
-function MergeTool({
-  copies,
-  onMerge,
-}: {
-  copies: RegisteredCopy[];
-  onMerge: (text: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  // Every registered page is shown (including unapproved ones, as flagged
-  // gaps) so nothing is silently skipped when merging.
-  const ordered = [...copies].sort((a, b) =>
-    a.side === b.side ? a.orderKey - b.orderKey : a.side.localeCompare(b.side)
-  );
-
-  const confirmMerge = () => {
-    const approved = ordered.filter((c) => c.status === "approved");
-    const text = approved.map((c) => c.transcript.trim()).join("\n\n");
-    onMerge(text);
-    setOpen(false);
-  };
-
-  return (
-    <div className="border-t border-border bg-paper-dim/40 px-3 py-2">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        disabled={copies.length === 0}
-        className="rounded-md border border-border bg-white/60 px-3 py-1 text-xs text-ink hover:bg-white disabled:opacity-40"
-      >
-        دمج الصفحات المعتمدة ومعاينتها
-      </button>
-
-      {open && (
-        <div className="mt-2 rounded-lg border border-border bg-white/70 p-2">
-          <ol dir="rtl" className="max-h-48 space-y-1 overflow-auto text-xs">
-            {ordered.map((c) => (
-              <li
-                key={`${c.side}-${c.id}`}
-                className={`flex items-center justify-between rounded px-2 py-1 ${
-                  c.status === "approved"
-                    ? "bg-green-50 text-green-800"
-                    : "bg-red-50 text-red-700"
-                }`}
-              >
-                <span>
-                  {c.side === "manuscript" ? "المخطوط" : "المطبوعة"} — نسخة {c.label} (ترتيب {c.orderKey})
-                </span>
-                <span>
-                  {c.status === "approved"
-                    ? `${c.transcript.trim().slice(0, 20)}…`
-                    : "⚠ غير معتمدة — فجوة"}
-                </span>
-              </li>
-            ))}
-          </ol>
-          <button
-            onClick={confirmMerge}
-            className="mt-2 rounded-md bg-bronze px-3 py-1 text-xs text-white hover:bg-bronze/90"
-          >
-            تأكيد الدمج وإدراجه في النص
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Drag handle between the center text panel and a side panel. Only ever
- * resizes the side panel's width, so the center panel's minimum is never
- * violated. Uses Pointer Events (not mouse-only events) with pointer
- * capture, so dragging works on touch/mobile as well as with a mouse —
- * plain mousemove/mouseup listeners never fire on touch input at all. */
-function ResizeHandle({ onDrag }: { onDrag: (deltaX: number) => void }) {
-  const dragging = useRef(false);
-  const lastX = useRef(0);
-
-  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    dragging.current = true;
-    lastX.current = e.clientX;
-    e.currentTarget.setPointerCapture(e.pointerId);
-    document.body.style.cursor = "col-resize";
-  };
-  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!dragging.current) return;
-    const delta = e.clientX - lastX.current;
-    lastX.current = e.clientX;
-    onDrag(delta);
-  };
-  const endDrag = (e: React.PointerEvent<HTMLDivElement>) => {
-    dragging.current = false;
-    document.body.style.cursor = "";
-    e.currentTarget.releasePointerCapture(e.pointerId);
-  };
-
-  return (
-    <div
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={endDrag}
-      onPointerCancel={endDrag}
-      className="group flex w-4 shrink-0 touch-none cursor-col-resize items-center justify-center"
-    >
-      <div className="h-16 w-1 rounded-full bg-border transition-colors group-hover:bg-bronze" />
-    </div>
-  );
-}
-
-type RegisteredCopy = {
-  id: string;
-  side: "manuscript" | "printed";
-  label: string;
-  orderKey: number;
-  status: "not_transcribed" | "draft" | "approved";
-  transcript: string;
-};
+  DEFAULT_EDITOR_FONT,
+  DEFAULT_SIDE_WIDTH,
+  FOOTNOTE_CATEGORIES,
+  MAX_EDITOR_FONT,
+  MAX_SIDE_WIDTH,
+  MIN_CENTER_WIDTH,
+  MIN_EDITOR_FONT,
+  MIN_SIDE_WIDTH,
+} from "./constants";
+import { downloadTextFile } from "./lib/download";
+import { FootnoteMark } from "./lib/footnoteExtension";
+import { buildProjectFile, parseProjectFile } from "./lib/projectFile";
+import { loadCards, saveCards } from "./lib/referenceStore";
+import type {
+  FootnoteCategoryKey,
+  FootnoteEntry,
+  PanelState,
+  ReferenceCard,
+  RegisteredCopy,
+  SyncMode,
+} from "./types";
 
 export default function App() {
   const [manuscriptState, setManuscriptState] = useState<PanelState>("expanded");
@@ -1343,6 +43,16 @@ export default function App() {
   const [printedWidth, setPrintedWidth] = useState(DEFAULT_SIDE_WIDTH);
   const [syncMode, setSyncMode] = useState<SyncMode>("independent");
   const [footnotes, setFootnotes] = useState<FootnoteEntry[]>([]);
+
+  /** Researcher-entered reference cards; kept in the browser's own storage
+   * so they survive a reload (the document itself is saved/opened through
+   * the project file). */
+  const [referenceCards, setReferenceCards] = useState<ReferenceCard[]>(() => loadCards());
+  useEffect(() => {
+    saveCards(referenceCards);
+  }, [referenceCards]);
+  const [editorFontSize, setEditorFontSize] = useState(DEFAULT_EDITOR_FONT);
+  const projectFileInputRef = useRef<HTMLInputElement>(null);
 
   /** Every copy's registration from both side panels (status, order,
    * transcript) — feeds both the comparison tool and the merge tool. */
@@ -1374,7 +84,7 @@ export default function App() {
       attributes: {
         dir: "rtl",
         class:
-          "h-full min-h-full whitespace-pre-wrap bg-transparent p-5 font-naskh text-lg leading-loose text-ink outline-none",
+          "h-full min-h-full whitespace-pre-wrap bg-transparent p-5 font-naskh text-[length:var(--editor-fs,18px)] leading-loose text-ink outline-none",
       },
     },
   });
@@ -1461,6 +171,51 @@ export default function App() {
     editor.commands.setContent(paragraphs.length ? paragraphs : "<p></p>");
   }, [editor]);
 
+  const addReferenceCard = useCallback((card: ReferenceCard) => {
+    setReferenceCards((prev) => [...prev, card]);
+  }, []);
+  const deleteReferenceCard = useCallback((id: string) => {
+    setReferenceCards((prev) => prev.filter((c) => c.id !== id));
+  }, []);
+
+  /** Saves the document (as ProseMirror JSON so footnote markers keep their
+   * ids), its footnotes and the reference cards to a .json project file.
+   * Page images and per-page transcripts live inside the side panels and
+   * are not part of this file yet. */
+  const saveProject = useCallback(() => {
+    if (!editor) return;
+    const json = buildProjectFile(
+      editor.getJSON() as { type: "doc"; content?: unknown[] },
+      footnotes,
+      referenceCards
+    );
+    downloadTextFile("مشروع-مساعد-المحقق.json", json, "application/json;charset=utf-8");
+  }, [editor, footnotes, referenceCards]);
+
+  const openProjectFile = useCallback(
+    async (file: File | undefined) => {
+      if (!file || !editor) return;
+      try {
+        const project = parseProjectFile(await file.text());
+        if (
+          !editor.isEmpty &&
+          !window.confirm("سيُستبدل النص الحالي والحواشي بمحتوى ملف المشروع. هل تريد المتابعة؟")
+        ) {
+          return;
+        }
+        editor.commands.setContent(project.document);
+        setFootnotes(project.footnotes);
+        setReferenceCards((prev) => {
+          const known = new Set(prev.map((c) => c.id));
+          return [...prev, ...project.referenceCards.filter((c) => !known.has(c.id))];
+        });
+      } catch (err) {
+        window.alert(err instanceof Error ? err.message : "تعذّر فتح ملف المشروع");
+      }
+    },
+    [editor]
+  );
+
   const [showPrintPreview, setShowPrintPreview] = useState(false);
   const [printBodyText, setPrintBodyText] = useState("");
   const [printFootnoteList, setPrintFootnoteList] = useState<
@@ -1543,6 +298,33 @@ export default function App() {
           </label>
 
           <button
+            onClick={saveProject}
+            className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1 text-sm text-ink-soft hover:bg-paper-dim"
+            title="حفظ النص والحواشي وبطاقات المراجع في ملف"
+          >
+            <Download size={14} />
+            <span>حفظ المشروع</span>
+          </button>
+          <button
+            onClick={() => projectFileInputRef.current?.click()}
+            className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1 text-sm text-ink-soft hover:bg-paper-dim"
+            title="فتح ملف مشروع محفوظ"
+          >
+            <FolderOpen size={14} />
+            <span>فتح مشروع</span>
+          </button>
+          <input
+            ref={projectFileInputRef}
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            onChange={(e) => {
+              void openProjectFile(e.target.files?.[0]);
+              e.target.value = "";
+            }}
+          />
+
+          <button
             onClick={buildPrintPreview}
             className="rounded-md border border-border px-3 py-1 text-sm text-ink-soft hover:bg-paper-dim"
           >
@@ -1597,6 +379,23 @@ export default function App() {
             <span className="font-ui text-sm font-semibold text-ink">
               نص التحقيق
             </span>
+            <div className="flex items-center gap-1 text-xs text-ink-soft">
+              <button
+                onClick={() => setEditorFontSize((v) => Math.max(MIN_EDITOR_FONT, v - 2))}
+                className="rounded p-1 hover:bg-paper-dim"
+                title="تصغير خط النص"
+              >
+                <ZoomOut size={14} />
+              </button>
+              <span className="w-9 text-center font-ui">{editorFontSize}px</span>
+              <button
+                onClick={() => setEditorFontSize((v) => Math.min(MAX_EDITOR_FONT, v + 2))}
+                className="rounded p-1 hover:bg-paper-dim"
+                title="تكبير خط النص"
+              >
+                <ZoomIn size={14} />
+              </button>
+            </div>
             <span className="text-xs text-ink-soft">
               الكلمات: {editor && editor.getText().trim() ? editor.getText().trim().split(/\s+/).length : 0} — الحروف: {editor?.getText().length ?? 0}
             </span>
@@ -1606,6 +405,7 @@ export default function App() {
           <div
             ref={editorWrapperRef}
             className="relative flex-1 overflow-auto"
+            style={{ ["--editor-fs" as string]: `${editorFontSize}px` }}
             onClick={(e) => {
               const marker = (e.target as HTMLElement).closest("sup[data-footnote-id]");
               const id = marker?.getAttribute("data-footnote-id");
@@ -1624,6 +424,12 @@ export default function App() {
           </div>
           <MergeTool copies={registeredCopies} onMerge={insertMergedText} />
           <CompareCopiesPanel copies={registeredCopies} onInsertFootnote={insertFootnote} />
+          <ReferenceBankPanel
+            cards={referenceCards}
+            onAddCard={addReferenceCard}
+            onDeleteCard={deleteReferenceCard}
+            onInsertFootnote={insertFootnote}
+          />
           <FootnotesPanel
             entries={footnotes}
             onInsert={insertFootnote}
@@ -1662,12 +468,28 @@ export default function App() {
           >
             <div className="mb-4 flex items-center justify-between border-b border-border pb-3">
               <h2 className="font-naskh text-lg font-bold text-ink">معاينة الطباعة</h2>
-              <button
-                onClick={() => setShowPrintPreview(false)}
-                className="rounded-md border border-border px-3 py-1 text-sm text-ink-soft hover:bg-paper-dim"
-              >
-                إغلاق
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    const notes = printFootnoteList.map((f) => `(${f.number}) ${f.text}`).join("\n");
+                    downloadTextFile(
+                      "النص-المحقق.txt",
+                      printFootnoteList.length ? `${printBodyText}\n\n————————\n${notes}\n` : `${printBodyText}\n`
+                    );
+                  }}
+                  disabled={!printBodyText}
+                  className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1 text-sm text-ink-soft hover:bg-paper-dim disabled:opacity-40"
+                >
+                  <Download size={14} />
+                  <span>تنزيل نصي</span>
+                </button>
+                <button
+                  onClick={() => setShowPrintPreview(false)}
+                  className="rounded-md border border-border px-3 py-1 text-sm text-ink-soft hover:bg-paper-dim"
+                >
+                  إغلاق
+                </button>
+              </div>
             </div>
 
             <p className="whitespace-pre-wrap font-naskh text-lg leading-loose text-ink">
