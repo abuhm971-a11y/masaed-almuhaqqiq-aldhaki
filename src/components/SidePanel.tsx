@@ -2,6 +2,8 @@ import { useRef, useState } from "react";
 import { FileText, RotateCw, Scissors, Upload } from "lucide-react";
 import { COPY_LABELS, IMAGE_NOTE_CATEGORIES } from "../constants";
 import { makeEmptyCopy } from "../lib/copies";
+import { splitOrderKey } from "../lib/pageOrder";
+import { useArchiveSync } from "../lib/useArchiveSync";
 import { cropImageHalves, dataUrlToFile, rotateImage90 } from "../lib/imageOps";
 import { transcribeImage } from "../lib/supabaseClient";
 import type {
@@ -74,6 +76,12 @@ export function SidePanel({
       })
     );
   };
+
+  useArchiveSync(side === "right" ? "manuscript" : "printed", copies, (restored) => {
+    setCopies(restored);
+    setActiveCopyId(restored[0].id);
+    restored.forEach(reportCopy);
+  });
 
   const nextOrderKey = () =>
     copies.length ? Math.max(...copies.map((c) => c.orderKey)) + 1 : 1;
@@ -167,9 +175,9 @@ export function SidePanel({
 
   /** Applies one crop as this copy's image (keeps this copy's orderKey —
    * it's the "right" position). The OTHER half is never discarded — it
-   * becomes a new copy tab with orderKey = this.orderKey + 0.5, so it
-   * sits correctly between this page and the next without renumbering
-   * anything else. */
+   * becomes a new copy tab positioned midway between this page and the
+   * next one (splitOrderKey), so it sits correctly without renumbering
+   * anything else — even when an already-split page is split again. */
   const useCrop = async (which: "left" | "right") => {
     const id = active.id;
     if (!active.crops) return;
@@ -189,7 +197,7 @@ export function SidePanel({
 
     const otherLabel = COPY_LABELS[copies.length] ?? `نسخة ${copies.length + 1}`;
     const otherCopy: Copy = {
-      ...makeEmptyCopy(otherLabel, active.orderKey + 0.5),
+      ...makeEmptyCopy(otherLabel, splitOrderKey(active.orderKey, copies.map((c) => c.orderKey))),
       fileName: otherFile.name,
       imageUrl: URL.createObjectURL(otherFile),
     };
@@ -471,7 +479,7 @@ export function SidePanel({
               rows={3}
               value={active.transcript}
               onChange={(e) => updateCopy(active.id, { transcript: e.target.value, approved: false })}
-              placeholder="سيظهر النص المفرَّغ هنا للمراجعة…"
+              placeholder="سيظهر النص المفرّغ هنا للمراجعة…"
               className="w-full resize-y rounded-md border border-border bg-white/80 p-1.5 text-xs leading-relaxed text-ink outline-none placeholder:text-ink-soft/50"
             />
           </div>
