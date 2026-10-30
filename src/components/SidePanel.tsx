@@ -479,7 +479,7 @@ export function SidePanel({
               rows={3}
               value={active.transcript}
               onChange={(e) => updateCopy(active.id, { transcript: e.target.value, approved: false })}
-              placeholder="سيظهر النص المفرّغ هنا للمراجعة…"
+              placeholder="سيظهر النص المفرَّغ هنا للمراجعة…"
               className="w-full resize-y rounded-md border border-border bg-white/80 p-1.5 text-xs leading-relaxed text-ink outline-none placeholder:text-ink-soft/50"
             />
           </div>
