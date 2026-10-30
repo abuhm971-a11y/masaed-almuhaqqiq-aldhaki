@@ -17,12 +17,34 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
+/** supabase-js reports any non-2xx answer from a function as a generic
+ * "returned a non-2xx status code" error and hides the real reason inside
+ * `error.context` (the raw Response). This surfaces the server's own
+ * message so the researcher (and we) can see why a call failed. */
+export async function explainFunctionError(error: unknown): Promise<Error> {
+  const ctx = (error as { context?: Response } | null)?.context;
+  if (ctx && typeof ctx.json === "function") {
+    try {
+      const body = await ctx.json();
+      const msg = [body?.error, body?.message, body?.details]
+        .filter((x): x is string => typeof x === "string" && x.length > 0)
+        .join(" — ")
+        .slice(0, 300);
+      if (msg) return new Error(msg);
+    } catch {
+      /* body was not JSON */
+    }
+    return new Error(`فشل استدعاء الدالة (HTTP ${ctx.status})`);
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
 export async function transcribeImage(file: File): Promise<string> {
   const imageBase64 = await fileToBase64(file);
   const { data, error } = await supabase.functions.invoke("transcribe", {
     body: { imageBase64, mimeType: file.type || "image/jpeg" },
   });
-  if (error) throw error;
+  if (error) throw await explainFunctionError(error);
   if (data?.error) throw new Error(data.error);
   return data?.text ?? "";
 }
@@ -34,7 +56,7 @@ export async function assistText(
   const { data, error } = await supabase.functions.invoke("assist", {
     body: { text, action },
   });
-  if (error) throw error;
+  if (error) throw await explainFunctionError(error);
   if (data?.error) throw new Error(data.error);
   return data?.text ?? "";
 }
