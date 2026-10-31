@@ -4,8 +4,8 @@ import {
   CONNECTOR_PHRASES,
   FOOTNOTE_CATEGORIES,
   REFERENCE_CATEGORIES,
-  REFERENCE_TO_FOOTNOTE,
 } from "../constants";
+import { formatCitation, targetCategory } from "../lib/citation";
 import type { FootnoteCategoryKey, ReferenceCard, ReferenceCategoryKey } from "../types";
 
 const CUSTOM = "__custom__";
@@ -61,21 +61,12 @@ export function ReferenceBankPanel({
   const chosen = cards.filter((c) => selected.includes(c.id));
   const phrase = phraseChoice === CUSTOM ? customPhrase.trim() : phraseChoice;
 
-  const preview = useMemo(() => {
-    if (chosen.length === 0) return "";
-    const parts = chosen.map((c) => {
-      const head = [c.title, includeAuthor ? c.author : "", c.details]
-        .map((x) => x.trim())
-        .filter(Boolean)
-        .join("، ");
-      return includeExcerpt && c.excerpt.trim() ? `${head}: «${c.excerpt.trim()}»` : head;
-    });
-    return `${phrase ? phrase + " " : ""}${parts.join("؛ و")}.`;
-  }, [chosen, phrase, includeAuthor, includeExcerpt]);
+  const preview = useMemo(
+    () => formatCitation(chosen, phrase, {}, { includeAuthor, includeExcerpt }),
+    [chosen, phrase, includeAuthor, includeExcerpt]
+  );
 
-  const autoTarget: FootnoteCategoryKey = chosen.length
-    ? REFERENCE_TO_FOOTNOTE[chosen[0].category]
-    : "takhrij";
+  const autoTarget: FootnoteCategoryKey = targetCategory(chosen);
   const target = targetOverride === "auto" ? autoTarget : targetOverride;
 
   const toggle = (id: string) =>
