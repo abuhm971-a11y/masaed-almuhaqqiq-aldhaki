@@ -5,7 +5,14 @@ import {
   FOOTNOTE_CATEGORIES,
   REFERENCE_CATEGORIES,
 } from "../constants";
-import { formatCitation, targetCategory } from "../lib/citation";
+import { formatCitation, targetCategory, type StyleMap } from "../lib/citation";
+import {
+  parseStyles,
+  presetKeyOf,
+  setTypeStyle,
+  STYLE_PRESETS,
+  STYLES_KEY,
+} from "../lib/citationStyles";
 import type {
   FootnoteCategoryKey,
   FootnoteEntry,
@@ -55,6 +62,25 @@ export function ReferenceBankPanel({
   const [customPhrase, setCustomPhrase] = useState("");
   const [includeAuthor, setIncludeAuthor] = useState(false);
   const [includeExcerpt, setIncludeExcerpt] = useState(false);
+  // Per-type documentation style, remembered in this browser.
+  const [typeStyles, setTypeStyles] = useState<StyleMap>(() => {
+    try {
+      return parseStyles(localStorage.getItem(STYLES_KEY));
+    } catch {
+      return {};
+    }
+  });
+  const [showStyles, setShowStyles] = useState(false);
+  const changeTypeStyle = (category: ReferenceCategoryKey, presetKey: string) =>
+    setTypeStyles((prev) => {
+      const next = setTypeStyle(prev, category, presetKey);
+      try {
+        localStorage.setItem(STYLES_KEY, JSON.stringify(next));
+      } catch {
+        /* storage unavailable: the choice just lasts for this session */
+      }
+      return next;
+    });
   const [targetOverride, setTargetOverride] = useState<FootnoteCategoryKey | "auto">("auto");
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState(EMPTY_DRAFT);
@@ -72,8 +98,8 @@ export function ReferenceBankPanel({
   const phrase = phraseChoice === CUSTOM ? customPhrase.trim() : phraseChoice;
 
   const preview = useMemo(
-    () => formatCitation(chosen, phrase, {}, { includeAuthor, includeExcerpt }),
-    [chosen, phrase, includeAuthor, includeExcerpt]
+    () => formatCitation(chosen, phrase, typeStyles, { includeAuthor, includeExcerpt }),
+    [chosen, phrase, typeStyles, includeAuthor, includeExcerpt]
   );
 
   const autoTarget: FootnoteCategoryKey = targetCategory(chosen);
@@ -326,7 +352,34 @@ export function ReferenceBankPanel({
                 />
                 <span>إثبات المقتطف</span>
               </label>
+              <button
+                type="button"
+                onClick={() => setShowStyles((v) => !v)}
+                className="text-bronze underline"
+              >
+                {showStyles ? "إخفاء أسلوب الأنواع" : "ضبط الأسلوب لكل نوع"}
+              </button>
             </div>
+            {showStyles && (
+              <div className="grid gap-1 rounded-md border border-border bg-white/60 p-2 text-xs text-ink-soft">
+                {REFERENCE_CATEGORIES.map((c) => (
+                  <label key={c.key} className="flex items-center justify-between gap-2">
+                    <span>{c.label}</span>
+                    <select
+                      value={presetKeyOf(typeStyles[c.key])}
+                      onChange={(e) => changeTypeStyle(c.key, e.target.value)}
+                      className="rounded border border-border bg-white px-1 py-0.5"
+                    >
+                      {STYLE_PRESETS.map((p) => (
+                        <option key={p.key} value={p.key}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
+              </div>
+            )}
             <div
               className="min-h-[2.75rem] rounded-md border border-border bg-white/80 p-2 font-naskh text-base leading-relaxed text-ink"
               aria-live="polite"
