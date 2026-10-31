@@ -6,7 +6,12 @@ import {
   REFERENCE_CATEGORIES,
 } from "../constants";
 import { formatCitation, targetCategory } from "../lib/citation";
-import type { FootnoteCategoryKey, ReferenceCard, ReferenceCategoryKey } from "../types";
+import type {
+  FootnoteCategoryKey,
+  FootnoteEntry,
+  ReferenceCard,
+  ReferenceCategoryKey,
+} from "../types";
 
 const CUSTOM = "__custom__";
 
@@ -31,11 +36,16 @@ export function ReferenceBankPanel({
   onAddCard,
   onDeleteCard,
   onInsertFootnote,
+  activeFootnote = null,
+  onAppendToFootnote,
 }: {
   cards: ReferenceCard[];
   onAddCard: (card: ReferenceCard) => void;
   onDeleteCard: (id: string) => void;
   onInsertFootnote: (categoryKey: FootnoteCategoryKey, text: string) => void;
+  /** The footnote currently selected in the footnotes panel, if any. */
+  activeFootnote?: FootnoteEntry | null;
+  onAppendToFootnote?: (id: string, citation: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState<ReferenceCategoryKey | "all">("all");
@@ -75,6 +85,12 @@ export function ReferenceBankPanel({
   const insert = () => {
     if (!preview) return;
     onInsertFootnote(target, preview);
+    setSelected([]);
+  };
+
+  const append = () => {
+    if (!preview || !activeFootnote || !onAppendToFootnote) return;
+    onAppendToFootnote(activeFootnote.id, preview);
     setSelected([]);
   };
 
@@ -321,7 +337,19 @@ export function ReferenceBankPanel({
                 </span>
               )}
             </div>
-            <div className="flex justify-end">
+            <div className="flex flex-wrap justify-end gap-2">
+              {activeFootnote && (
+                <button
+                  onClick={append}
+                  disabled={!preview}
+                  className="rounded-md border border-bronze bg-white px-3 py-1 text-xs text-ink disabled:opacity-40"
+                  title="يُلحق العزو بالحاشية المحددة دون مسح ما كتبتَه فيها"
+                >
+                  إلحاق بالحاشية المحددة (
+                  {FOOTNOTE_CATEGORIES.find((c) => c.key === activeFootnote.category)?.label}{" "}
+                  {activeFootnote.index})
+                </button>
+              )}
               <button
                 onClick={insert}
                 disabled={!preview}
