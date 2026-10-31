@@ -8,6 +8,7 @@ import { AssistToolbar } from "./components/AssistToolbar";
 import { CompareCopiesPanel } from "./components/CompareCopiesPanel";
 import { FootnotesPanel } from "./components/FootnotesPanel";
 import { appendCitation } from "./lib/citation";
+import type { JSONContent } from "@tiptap/core";
 import { FormatToolbar } from "./components/FormatToolbar";
 import { MergeTool } from "./components/MergeTool";
 import { ReferenceBankPanel } from "./components/ReferenceBankPanel";
@@ -198,7 +199,7 @@ export default function App() {
   const saveProject = useCallback(() => {
     if (!editor) return;
     const json = buildProjectFile(
-      editor.getJSON() as { type: "doc"; content?: unknown[] },
+      editor.getJSON() as { type: "doc"; content?: JSONContent[] },
       footnotes,
       referenceCards
     );
