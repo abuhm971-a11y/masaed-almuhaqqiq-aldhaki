@@ -1,3 +1,4 @@
+import type { JSONContent } from "@tiptap/core";
 import { PROJECT_FORMAT } from "../constants";
 import type { FootnoteEntry, ReferenceCard } from "../types";
 import { sanitizeCards } from "./referenceStore";
@@ -7,7 +8,7 @@ export type ProjectFile = {
   version: 1;
   savedAt: string;
   /** ProseMirror JSON (not HTML) so footnote markers keep their ids. */
-  document: { type: "doc"; content?: unknown[] };
+  document: { type: "doc"; content?: JSONContent[] };
   footnotes: FootnoteEntry[];
   referenceCards: ReferenceCard[];
 };
