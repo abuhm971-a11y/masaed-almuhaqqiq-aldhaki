@@ -7,6 +7,7 @@ import TextAlign from "@tiptap/extension-text-align";
 import { AssistToolbar } from "./components/AssistToolbar";
 import { CompareCopiesPanel } from "./components/CompareCopiesPanel";
 import { FootnotesPanel } from "./components/FootnotesPanel";
+import { appendCitation } from "./lib/citation";
 import { FormatToolbar } from "./components/FormatToolbar";
 import { MergeTool } from "./components/MergeTool";
 import { ReferenceBankPanel } from "./components/ReferenceBankPanel";
@@ -43,6 +44,9 @@ export default function App() {
   const [printedWidth, setPrintedWidth] = useState(DEFAULT_SIDE_WIDTH);
   const [syncMode, setSyncMode] = useState<SyncMode>("independent");
   const [footnotes, setFootnotes] = useState<FootnoteEntry[]>([]);
+  /** The footnote a citation from the reference bank is appended to: the
+   * last one created, or the one whose text box the researcher touched. */
+  const [activeFootnoteId, setActiveFootnoteId] = useState<string | null>(null);
 
   /** Researcher-entered reference cards; kept in the browser's own storage
    * so they survive a reload (the document itself is saved/opened through
@@ -137,10 +141,19 @@ export default function App() {
       ...prev,
       { id, category: categoryKey, index: nextIndex, text: presetText, includeInPrint: true },
     ]);
+    setActiveFootnoteId(id);
   }, [editor, footnotes]);
 
   const updateFootnoteText = useCallback((id: string, text: string) => {
     setFootnotes((prev) => prev.map((f) => (f.id === id ? { ...f, text } : f)));
+  }, []);
+
+  /** Adds a citation to an existing footnote without overwriting what the
+   * researcher already typed (and never twice). */
+  const appendToFootnote = useCallback((id: string, citation: string) => {
+    setFootnotes((prev) =>
+      prev.map((f) => (f.id === id ? { ...f, text: appendCitation(f.text, citation) } : f))
+    );
   }, []);
 
   const toggleFootnoteInclude = useCallback((id: string) => {
@@ -429,9 +442,13 @@ export default function App() {
             onAddCard={addReferenceCard}
             onDeleteCard={deleteReferenceCard}
             onInsertFootnote={insertFootnote}
+            activeFootnote={footnotes.find((f) => f.id === activeFootnoteId) ?? null}
+            onAppendToFootnote={appendToFootnote}
           />
           <FootnotesPanel
             entries={footnotes}
+            activeId={activeFootnoteId}
+            onFocusEntry={setActiveFootnoteId}
             onInsert={insertFootnote}
             onChangeText={updateFootnoteText}
             onToggleInclude={toggleFootnoteInclude}
