@@ -11,11 +11,15 @@ export function FootnotesPanel({
   onInsert,
   onChangeText,
   onToggleInclude,
+  activeId = null,
+  onFocusEntry,
 }: {
   entries: FootnoteEntry[];
   onInsert: (categoryKey: FootnoteCategoryKey) => void;
   onChangeText: (id: string, text: string) => void;
   onToggleInclude: (id: string) => void;
+  activeId?: string | null;
+  onFocusEntry?: (id: string) => void;
 }) {
   const countFor = (key: FootnoteCategoryKey) =>
     entries.filter((e) => e.category === key).length;
@@ -65,8 +69,11 @@ export function FootnotesPanel({
                         rows={2}
                         value={entry.text}
                         onChange={(e) => onChangeText(entry.id, e.target.value)}
+                        onFocus={() => onFocusEntry?.(entry.id)}
                         placeholder="اكتب نص الحاشية هنا…"
-                        className="min-w-0 flex-1 resize-y rounded-md border border-border bg-white/80 p-2 font-naskh text-base leading-relaxed text-ink outline-none placeholder:text-ink-soft/50"
+                        className={`min-w-0 flex-1 resize-y rounded-md border border-border bg-white/80 p-2 font-naskh text-base leading-relaxed text-ink outline-none placeholder:text-ink-soft/50 ${
+                          entry.id === activeId ? "ring-2 ring-bronze/60" : ""
+                        }`}
                       />
                       <label
                         className="mt-1 flex shrink-0 flex-col items-center gap-0.5 text-[10px] text-ink-soft"

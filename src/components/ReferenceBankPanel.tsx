@@ -4,9 +4,14 @@ import {
   CONNECTOR_PHRASES,
   FOOTNOTE_CATEGORIES,
   REFERENCE_CATEGORIES,
-  REFERENCE_TO_FOOTNOTE,
 } from "../constants";
-import type { FootnoteCategoryKey, ReferenceCard, ReferenceCategoryKey } from "../types";
+import { formatCitation, targetCategory } from "../lib/citation";
+import type {
+  FootnoteCategoryKey,
+  FootnoteEntry,
+  ReferenceCard,
+  ReferenceCategoryKey,
+} from "../types";
 
 const CUSTOM = "__custom__";
 
@@ -31,11 +36,16 @@ export function ReferenceBankPanel({
   onAddCard,
   onDeleteCard,
   onInsertFootnote,
+  activeFootnote = null,
+  onAppendToFootnote,
 }: {
   cards: ReferenceCard[];
   onAddCard: (card: ReferenceCard) => void;
   onDeleteCard: (id: string) => void;
   onInsertFootnote: (categoryKey: FootnoteCategoryKey, text: string) => void;
+  /** The footnote currently selected in the footnotes panel, if any. */
+  activeFootnote?: FootnoteEntry | null;
+  onAppendToFootnote?: (id: string, citation: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState<ReferenceCategoryKey | "all">("all");
@@ -61,21 +71,12 @@ export function ReferenceBankPanel({
   const chosen = cards.filter((c) => selected.includes(c.id));
   const phrase = phraseChoice === CUSTOM ? customPhrase.trim() : phraseChoice;
 
-  const preview = useMemo(() => {
-    if (chosen.length === 0) return "";
-    const parts = chosen.map((c) => {
-      const head = [c.title, includeAuthor ? c.author : "", c.details]
-        .map((x) => x.trim())
-        .filter(Boolean)
-        .join("، ");
-      return includeExcerpt && c.excerpt.trim() ? `${head}: «${c.excerpt.trim()}»` : head;
-    });
-    return `${phrase ? phrase + " " : ""}${parts.join("؛ و")}.`;
-  }, [chosen, phrase, includeAuthor, includeExcerpt]);
+  const preview = useMemo(
+    () => formatCitation(chosen, phrase, {}, { includeAuthor, includeExcerpt }),
+    [chosen, phrase, includeAuthor, includeExcerpt]
+  );
 
-  const autoTarget: FootnoteCategoryKey = chosen.length
-    ? REFERENCE_TO_FOOTNOTE[chosen[0].category]
-    : "takhrij";
+  const autoTarget: FootnoteCategoryKey = targetCategory(chosen);
   const target = targetOverride === "auto" ? autoTarget : targetOverride;
 
   const toggle = (id: string) =>
@@ -84,6 +85,12 @@ export function ReferenceBankPanel({
   const insert = () => {
     if (!preview) return;
     onInsertFootnote(target, preview);
+    setSelected([]);
+  };
+
+  const append = () => {
+    if (!preview || !activeFootnote || !onAppendToFootnote) return;
+    onAppendToFootnote(activeFootnote.id, preview);
     setSelected([]);
   };
 
@@ -330,7 +337,19 @@ export function ReferenceBankPanel({
                 </span>
               )}
             </div>
-            <div className="flex justify-end">
+            <div className="flex flex-wrap justify-end gap-2">
+              {activeFootnote && (
+                <button
+                  onClick={append}
+                  disabled={!preview}
+                  className="rounded-md border border-bronze bg-white px-3 py-1 text-xs text-ink disabled:opacity-40"
+                  title="يُلحق العزو بالحاشية المحددة دون مسح ما كتبتَه فيها"
+                >
+                  إلحاق بالحاشية المحددة (
+                  {FOOTNOTE_CATEGORIES.find((c) => c.key === activeFootnote.category)?.label}{" "}
+                  {activeFootnote.index})
+                </button>
+              )}
               <button
                 onClick={insert}
                 disabled={!preview}
