@@ -3,7 +3,7 @@ import { archive, type ArchivedPage } from "./archiveStore";
 import { makeEmptyCopy } from "./copies";
 import type { Copy } from "../types";
 
-const SAVE_DELAY_MS = 500;
+export const SAVE_DELAY_MS = 500;
 
 /** A tab with nothing in it (no image, text, or notes) is not worth
  * persisting — it would only resurrect an empty placeholder on reload. */
