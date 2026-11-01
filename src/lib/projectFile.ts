@@ -1,6 +1,7 @@
 import type { JSONContent } from "@tiptap/core";
 import { PROJECT_FORMAT } from "../constants";
 import type { FootnoteEntry, ReferenceCard } from "../types";
+import { sanitizeProjectPages, type ProjectPage } from "./projectPages";
 import { sanitizeCards } from "./referenceStore";
 
 export type ProjectFile = {
@@ -11,12 +12,16 @@ export type ProjectFile = {
   document: { type: "doc"; content?: JSONContent[] };
   footnotes: FootnoteEntry[];
   referenceCards: ReferenceCard[];
+  /** Page archive (images optional). Absent in files saved before this
+   * existed — opening those leaves the researcher's pages untouched. */
+  pages?: ProjectPage[];
 };
 
 export function buildProjectFile(
   document: ProjectFile["document"],
   footnotes: FootnoteEntry[],
-  referenceCards: ReferenceCard[]
+  referenceCards: ReferenceCard[],
+  pages?: ProjectPage[]
 ): string {
   const file: ProjectFile = {
     format: PROJECT_FORMAT,
@@ -25,6 +30,7 @@ export function buildProjectFile(
     document,
     footnotes,
     referenceCards,
+    ...(pages ? { pages } : {}),
   };
   return JSON.stringify(file, null, 2);
 }
@@ -49,5 +55,6 @@ export function parseProjectFile(text: string): ProjectFile {
     document: d.document,
     footnotes,
     referenceCards: sanitizeCards(d.referenceCards),
+    ...(Array.isArray(d.pages) ? { pages: sanitizeProjectPages(d.pages) } : {}),
   };
 }
