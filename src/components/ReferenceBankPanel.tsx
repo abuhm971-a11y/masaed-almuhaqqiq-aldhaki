@@ -4,9 +4,21 @@ import {
   CONNECTOR_PHRASES,
   FOOTNOTE_CATEGORIES,
   REFERENCE_CATEGORIES,
-  REFERENCE_TO_FOOTNOTE,
 } from "../constants";
-import type { FootnoteCategoryKey, ReferenceCard, ReferenceCategoryKey } from "../types";
+import { formatCitation, targetCategory, type StyleMap } from "../lib/citation";
+import {
+  parseStyles,
+  presetKeyOf,
+  setTypeStyle,
+  STYLE_PRESETS,
+  STYLES_KEY,
+} from "../lib/citationStyles";
+import type {
+  FootnoteCategoryKey,
+  FootnoteEntry,
+  ReferenceCard,
+  ReferenceCategoryKey,
+} from "../types";
 
 const CUSTOM = "__custom__";
 
@@ -31,11 +43,16 @@ export function ReferenceBankPanel({
   onAddCard,
   onDeleteCard,
   onInsertFootnote,
+  activeFootnote = null,
+  onAppendToFootnote,
 }: {
   cards: ReferenceCard[];
   onAddCard: (card: ReferenceCard) => void;
   onDeleteCard: (id: string) => void;
   onInsertFootnote: (categoryKey: FootnoteCategoryKey, text: string) => void;
+  /** The footnote currently selected in the footnotes panel, if any. */
+  activeFootnote?: FootnoteEntry | null;
+  onAppendToFootnote?: (id: string, citation: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState<ReferenceCategoryKey | "all">("all");
@@ -45,6 +62,25 @@ export function ReferenceBankPanel({
   const [customPhrase, setCustomPhrase] = useState("");
   const [includeAuthor, setIncludeAuthor] = useState(false);
   const [includeExcerpt, setIncludeExcerpt] = useState(false);
+  // Per-type documentation style, remembered in this browser.
+  const [typeStyles, setTypeStyles] = useState<StyleMap>(() => {
+    try {
+      return parseStyles(localStorage.getItem(STYLES_KEY));
+    } catch {
+      return {};
+    }
+  });
+  const [showStyles, setShowStyles] = useState(false);
+  const changeTypeStyle = (category: ReferenceCategoryKey, presetKey: string) =>
+    setTypeStyles((prev) => {
+      const next = setTypeStyle(prev, category, presetKey);
+      try {
+        localStorage.setItem(STYLES_KEY, JSON.stringify(next));
+      } catch {
+        /* storage unavailable: the choice just lasts for this session */
+      }
+      return next;
+    });
   const [targetOverride, setTargetOverride] = useState<FootnoteCategoryKey | "auto">("auto");
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState(EMPTY_DRAFT);
@@ -61,21 +97,12 @@ export function ReferenceBankPanel({
   const chosen = cards.filter((c) => selected.includes(c.id));
   const phrase = phraseChoice === CUSTOM ? customPhrase.trim() : phraseChoice;
 
-  const preview = useMemo(() => {
-    if (chosen.length === 0) return "";
-    const parts = chosen.map((c) => {
-      const head = [c.title, includeAuthor ? c.author : "", c.details]
-        .map((x) => x.trim())
-        .filter(Boolean)
-        .join("، ");
-      return includeExcerpt && c.excerpt.trim() ? `${head}: «${c.excerpt.trim()}»` : head;
-    });
-    return `${phrase ? phrase + " " : ""}${parts.join("؛ و")}.`;
-  }, [chosen, phrase, includeAuthor, includeExcerpt]);
+  const preview = useMemo(
+    () => formatCitation(chosen, phrase, typeStyles, { includeAuthor, includeExcerpt }),
+    [chosen, phrase, typeStyles, includeAuthor, includeExcerpt]
+  );
 
-  const autoTarget: FootnoteCategoryKey = chosen.length
-    ? REFERENCE_TO_FOOTNOTE[chosen[0].category]
-    : "takhrij";
+  const autoTarget: FootnoteCategoryKey = targetCategory(chosen);
   const target = targetOverride === "auto" ? autoTarget : targetOverride;
 
   const toggle = (id: string) =>
@@ -84,6 +111,12 @@ export function ReferenceBankPanel({
   const insert = () => {
     if (!preview) return;
     onInsertFootnote(target, preview);
+    setSelected([]);
+  };
+
+  const append = () => {
+    if (!preview || !activeFootnote || !onAppendToFootnote) return;
+    onAppendToFootnote(activeFootnote.id, preview);
     setSelected([]);
   };
 
@@ -319,7 +352,34 @@ export function ReferenceBankPanel({
                 />
                 <span>إثبات المقتطف</span>
               </label>
+              <button
+                type="button"
+                onClick={() => setShowStyles((v) => !v)}
+                className="text-bronze underline"
+              >
+                {showStyles ? "إخفاء أسلوب الأنواع" : "ضبط الأسلوب لكل نوع"}
+              </button>
             </div>
+            {showStyles && (
+              <div className="grid gap-1 rounded-md border border-border bg-white/60 p-2 text-xs text-ink-soft">
+                {REFERENCE_CATEGORIES.map((c) => (
+                  <label key={c.key} className="flex items-center justify-between gap-2">
+                    <span>{c.label}</span>
+                    <select
+                      value={presetKeyOf(typeStyles[c.key])}
+                      onChange={(e) => changeTypeStyle(c.key, e.target.value)}
+                      className="rounded border border-border bg-white px-1 py-0.5"
+                    >
+                      {STYLE_PRESETS.map((p) => (
+                        <option key={p.key} value={p.key}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
+              </div>
+            )}
             <div
               className="min-h-[2.75rem] rounded-md border border-border bg-white/80 p-2 font-naskh text-base leading-relaxed text-ink"
               aria-live="polite"
@@ -330,7 +390,19 @@ export function ReferenceBankPanel({
                 </span>
               )}
             </div>
-            <div className="flex justify-end">
+            <div className="flex flex-wrap justify-end gap-2">
+              {activeFootnote && (
+                <button
+                  onClick={append}
+                  disabled={!preview}
+                  className="rounded-md border border-bronze bg-white px-3 py-1 text-xs text-ink disabled:opacity-40"
+                  title="يُلحق العزو بالحاشية المحددة دون مسح ما كتبتَه فيها"
+                >
+                  إلحاق بالحاشية المحددة (
+                  {FOOTNOTE_CATEGORIES.find((c) => c.key === activeFootnote.category)?.label}{" "}
+                  {activeFootnote.index})
+                </button>
+              )}
               <button
                 onClick={insert}
                 disabled={!preview}

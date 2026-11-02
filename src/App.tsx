@@ -7,6 +7,8 @@ import TextAlign from "@tiptap/extension-text-align";
 import { AssistToolbar } from "./components/AssistToolbar";
 import { CompareCopiesPanel } from "./components/CompareCopiesPanel";
 import { FootnotesPanel } from "./components/FootnotesPanel";
+import { appendCitation } from "./lib/citation";
+import type { JSONContent } from "@tiptap/core";
 import { FormatToolbar } from "./components/FormatToolbar";
 import { MergeTool } from "./components/MergeTool";
 import { ReferenceBankPanel } from "./components/ReferenceBankPanel";
@@ -25,7 +27,15 @@ import {
 } from "./constants";
 import { downloadTextFile } from "./lib/download";
 import { FootnoteMark } from "./lib/footnoteExtension";
+import { archive } from "./lib/archiveStore";
 import { buildProjectFile, parseProjectFile } from "./lib/projectFile";
+import {
+  pagesToProject,
+  projectToArchived,
+  replaceArchive,
+  type ProjectPage,
+} from "./lib/projectPages";
+import { SAVE_DELAY_MS } from "./lib/useArchiveSync";
 import { loadCards, saveCards } from "./lib/referenceStore";
 import type {
   FootnoteCategoryKey,
@@ -43,6 +53,9 @@ export default function App() {
   const [printedWidth, setPrintedWidth] = useState(DEFAULT_SIDE_WIDTH);
   const [syncMode, setSyncMode] = useState<SyncMode>("independent");
   const [footnotes, setFootnotes] = useState<FootnoteEntry[]>([]);
+  /** The footnote a citation from the reference bank is appended to: the
+   * last one created, or the one whose text box the researcher touched. */
+  const [activeFootnoteId, setActiveFootnoteId] = useState<string | null>(null);
 
   /** Researcher-entered reference cards; kept in the browser's own storage
    * so they survive a reload (the document itself is saved/opened through
@@ -57,6 +70,12 @@ export default function App() {
   /** Every copy's registration from both side panels (status, order,
    * transcript) — feeds both the comparison tool and the merge tool. */
   const [registeredCopies, setRegisteredCopies] = useState<RegisteredCopy[]>([]);
+  /** Whether a saved project carries the page images (bigger file) or only
+   * the page texts. */
+  const [includeImages, setIncludeImages] = useState(true);
+  /** Bumped after opening a project that carries pages, so both side panels
+   * reload from the (just replaced) archive. */
+  const [archiveEpoch, setArchiveEpoch] = useState(0);
   const onCopyUpdate = useCallback(
     (side: "manuscript" | "printed") =>
       (c: { id: string; label: string; orderKey: number; status: RegisteredCopy["status"]; transcript: string }) => {
@@ -137,10 +156,19 @@ export default function App() {
       ...prev,
       { id, category: categoryKey, index: nextIndex, text: presetText, includeInPrint: true },
     ]);
+    setActiveFootnoteId(id);
   }, [editor, footnotes]);
 
   const updateFootnoteText = useCallback((id: string, text: string) => {
     setFootnotes((prev) => prev.map((f) => (f.id === id ? { ...f, text } : f)));
+  }, []);
+
+  /** Adds a citation to an existing footnote without overwriting what the
+   * researcher already typed (and never twice). */
+  const appendToFootnote = useCallback((id: string, citation: string) => {
+    setFootnotes((prev) =>
+      prev.map((f) => (f.id === id ? { ...f, text: appendCitation(f.text, citation) } : f))
+    );
   }, []);
 
   const toggleFootnoteInclude = useCallback((id: string) => {
@@ -180,17 +208,27 @@ export default function App() {
 
   /** Saves the document (as ProseMirror JSON so footnote markers keep their
    * ids), its footnotes and the reference cards to a .json project file.
-   * Page images and per-page transcripts live inside the side panels and
-   * are not part of this file yet. */
-  const saveProject = useCallback(() => {
+   * The page archive (texts, approval, notes, and optionally the images) is
+   * included too. */
+  const saveProject = useCallback(async () => {
     if (!editor) return;
+    // The archive is written a moment after each edit; let the last one land.
+    await new Promise((r) => setTimeout(r, SAVE_DELAY_MS + 300));
+    let pages: ProjectPage[] | undefined;
+    try {
+      const projectPages = await pagesToProject(await archive.loadAll(), includeImages);
+      pages = projectPages.length ? projectPages : undefined;
+    } catch {
+      pages = undefined; // archive unavailable: save text, footnotes and cards as before
+    }
     const json = buildProjectFile(
-      editor.getJSON() as { type: "doc"; content?: unknown[] },
+      editor.getJSON() as { type: "doc"; content?: JSONContent[] },
       footnotes,
-      referenceCards
+      referenceCards,
+      pages
     );
     downloadTextFile("مشروع-مساعد-المحقق.json", json, "application/json;charset=utf-8");
-  }, [editor, footnotes, referenceCards]);
+  }, [editor, footnotes, referenceCards, includeImages]);
 
   const openProjectFile = useCallback(
     async (file: File | undefined) => {
@@ -202,6 +240,22 @@ export default function App() {
           !window.confirm("سيُستبدل النص الحالي والحواشي بمحتوى ملف المشروع. هل تريد المتابعة؟")
         ) {
           return;
+        }
+        // Pages are replaced only when the file actually carries pages; older
+        // files leave the researcher's page archive untouched.
+        if (project.pages?.length) {
+          const existing = await archive.loadAll().catch(() => []);
+          if (
+            existing.length &&
+            !window.confirm(
+              `سيُستبدل أرشيف الصفحات الحالي (${existing.length} صفحة) بصفحات الملف. هل تريد المتابعة؟`
+            )
+          ) {
+            return;
+          }
+          await replaceArchive(projectToArchived(project.pages));
+          setRegisteredCopies([]);
+          setArchiveEpoch((n) => n + 1);
         }
         editor.commands.setContent(project.document);
         setFootnotes(project.footnotes);
@@ -297,6 +351,17 @@ export default function App() {
             </select>
           </label>
 
+          <label
+            className="flex items-center gap-1 text-xs text-ink-soft"
+            title="تضمين صور الصفحات في ملف المشروع (يكبر حجم الملف)"
+          >
+            <input
+              type="checkbox"
+              checked={includeImages}
+              onChange={(e) => setIncludeImages(e.target.checked)}
+            />
+            <span>مع صور الصفحات</span>
+          </label>
           <button
             onClick={saveProject}
             className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1 text-sm text-ink-soft hover:bg-paper-dim"
@@ -353,6 +418,7 @@ export default function App() {
       {/* Workspace: manuscript (right) — text (center, always present) — printed (left) */}
       <main className="flex flex-1 gap-2 overflow-hidden p-3">
         <SidePanel
+          key={`manuscript-${archiveEpoch}`}
           side="right"
           title="المخطوط"
           state={manuscriptState}
@@ -429,9 +495,13 @@ export default function App() {
             onAddCard={addReferenceCard}
             onDeleteCard={deleteReferenceCard}
             onInsertFootnote={insertFootnote}
+            activeFootnote={footnotes.find((f) => f.id === activeFootnoteId) ?? null}
+            onAppendToFootnote={appendToFootnote}
           />
           <FootnotesPanel
             entries={footnotes}
+            activeId={activeFootnoteId}
+            onFocusEntry={setActiveFootnoteId}
             onInsert={insertFootnote}
             onChangeText={updateFootnoteText}
             onToggleInclude={toggleFootnoteInclude}
@@ -447,6 +517,7 @@ export default function App() {
         )}
 
         <SidePanel
+          key={`printed-${archiveEpoch}`}
           side="left"
           title="المطبوعة"
           state={printedState}
